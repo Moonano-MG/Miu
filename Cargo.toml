@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/miu-core",
+    "crates/miu-ffi",
+]
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Moonano-MG/Miu"
+description = "A capability-driven cross-platform 2D rendering engine."
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

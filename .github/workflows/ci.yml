@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core-and-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.75.0
+      - name: Test Rust policy, CPU renderer, and ABI crates
+        shell: bash
+        run: |
+          set +e
+          cargo test --workspace --all-targets 2>&1 | tee /tmp/miu-cargo-test.log
+          status=${PIPESTATUS[0]}
+          {
+            echo '### Rust test output'
+            echo '```text'
+            tail -n 300 /tmp/miu-cargo-test.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            while IFS= read -r line; do
+              escaped=${line//'%'/'%25'}
+              escaped=${escaped//$'\r'/'%0D'}
+              escaped=${escaped//$'\n'/'%0A'}
+              echo "::error title=Rust test failure::${escaped}"
+            done < <(tail -n 80 /tmp/miu-cargo-test.log)
+          fi
+          exit "$status"
+      - name: Configure C++ bridge
+        run: cmake -S . -B build -DMIU_BUILD_NATIVE_BRIDGE=ON
+      - name: Build C++ bridge
+        run: cmake --build build --config Release
+      - name: Syntax-check C++ public API samples
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Iinclude -Inative/include -c samples/cpp/minimal.cpp -o /tmp/miu-minimal.o
+          c++ -std=c++17 -Wall -Wextra -Werror -Iinclude -Inative/include -c samples/cpp/software_canvas.cpp -o /tmp/miu-software-canvas.o
+
+  csharp-binding:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build C# bindings
+        run: dotnet build bindings/csharp/Miu.csproj --configuration Release
