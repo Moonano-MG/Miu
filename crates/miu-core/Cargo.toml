@@ -1,0 +1,10 @@
+[package]
+name = "miu-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Platform-neutral selection, camera, and batching core for Miu."
+
+[lints]
+workspace = true

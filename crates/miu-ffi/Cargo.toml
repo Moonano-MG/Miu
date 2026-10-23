@@ -1,0 +1,16 @@
+[package]
+name = "miu-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Stable C ABI for Miu, used by C++ and C# bindings."
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+miu-core = { path = "../miu-core" }
+
+[lints]
+workspace = true
