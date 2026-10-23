@@ -14,7 +14,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: 1.75.0
       - name: Test Rust policy, CPU renderer, and ABI crates
         shell: bash
         run: |
