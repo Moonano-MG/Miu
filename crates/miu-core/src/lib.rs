@@ -676,7 +676,7 @@ impl BatchBuilder {
         });
 
         let sprites: Vec<Sprite> = self.queued.iter().map(|item| item.sprite).collect();
-        let mut batches = Vec::new();
+        let mut batches: Vec<DrawBatch> = Vec::new();
         for (index, sprite) in sprites.iter().enumerate() {
             match batches.last_mut() {
                 Some(batch) if batch.texture == sprite.texture && batch.layer == sprite.layer => {
