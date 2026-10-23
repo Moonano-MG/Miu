@@ -27,6 +27,14 @@ jobs:
             tail -n 300 /tmp/miu-cargo-test.log
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            while IFS= read -r line; do
+              escaped=${line//'%'/'%25'}
+              escaped=${escaped//$'\r'/'%0D'}
+              escaped=${escaped//$'\n'/'%0A'}
+              echo "::error title=Rust test failure::${escaped}"
+            done < <(tail -n 80 /tmp/miu-cargo-test.log)
+          fi
           exit "$status"
       - name: Configure C++ bridge
         run: cmake -S . -B build -DMIU_BUILD_NATIVE_BRIDGE=ON
