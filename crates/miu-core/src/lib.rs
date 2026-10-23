@@ -748,8 +748,8 @@ mod tests {
         let device = DeviceCapabilities::for_platform(Platform::Linux)
             .with_backend(Backend::Vulkan14);
         let request = RendererRequest::new(RenderTier::Balanced);
-        let plan = select_renderer(&device, &request).expect("Vulkan 1.4 supports 1.3");
-        assert_eq!(plan.backend, Backend::Vulkan13);
+        let plan = select_renderer(&device, &request).expect("Vulkan 1.4 supports 1.2");
+        assert_eq!(plan.backend, Backend::Vulkan12);
     }
 
     #[test]
