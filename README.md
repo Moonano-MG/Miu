@@ -2,7 +2,7 @@
 
 **Miu** is a capability-driven, cross-platform 2D renderer. Its rendering policy is written in Rust; a deliberately small C ABI makes it usable from modern C++, C#, and other native hosts. C++ owns the optional platform bridge layer so existing graphics SDKs can be integrated without exposing them through Rust's public API.
 
-> Status: **v0.1.0-dev foundation**. The repository currently provides deterministic backend selection, minimum-requirement diagnostics, a 2D camera, sorted draw batching, and native/C#/C++ API surfaces. Hardware command encoders are an integration point, not yet a complete GPU renderer.
+> Status: **v0.1.0-dev foundation**. The repository provides deterministic backend selection, minimum-requirement diagnostics, a 2D camera, sorted draw batching, a deterministic premultiplied-RGBA CPU renderer, and native/C#/C++ API surfaces. Hardware command encoders are an integration point; they are not yet complete GPU backend implementations.
 
 ## Design goals
 
@@ -25,8 +25,8 @@ If the requested primary API cannot initialise, Miu's **emergency** candidates a
 ## Repository layout
 
 ```text
-crates/miu-core    Rust policy, Camera2D, and batch builder
-crates/miu-ffi     versioned C ABI and opaque renderer handle
+crates/miu-core    Rust policy, Camera2D, batching, and CPU reference renderer
+crates/miu-ffi     versioned C ABI, policy handle, CPU texture/canvas handles
 include/miu        public C header and zero-exception C++17 wrapper
 native             C++ platform-probe bridge contract and default probe
 bindings/csharp    allocation-free P/Invoke surface
@@ -58,6 +58,16 @@ Compile `native/src/miu_bridge.cpp` with C++17 for the default platform probe, o
 
 ```sh
 c++ -std=c++17 -Iinclude -Inative/include -c samples/cpp/minimal.cpp
+c++ -std=c++17 -Iinclude -Inative/include -c samples/cpp/software_canvas.cpp
+```
+
+The software renderer is fully deterministic and requires neither a window nor a
+GPU driver. It is suitable for headless tests, tools, and visual-novel preview
+surfaces. Generate a small composited scene with:
+
+```sh
+cargo run -p miu-core --example software_scene
+# writes miu-software-scene.ppm
 ```
 
 `bindings/csharp/Miu.cs` intentionally has no NuGet dependency. Update `NativeLibrary` only if you package the library under another name.

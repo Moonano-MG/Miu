@@ -141,6 +141,109 @@ MIU_API miu_status_t miu_renderer_get_plan(
 /** Releases a renderer-policy handle. It is safe to pass NULL. */
 MIU_API void miu_renderer_release(miu_renderer* renderer);
 
+/** A premultiplied RGBA colour used by Miu's CPU reference renderer. */
+typedef struct miu_rgba8 {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint8_t a;
+} miu_rgba8;
+
+/** A float two-dimensional point or vector. */
+typedef struct miu_vec2 {
+    float x;
+    float y;
+} miu_vec2;
+
+/** Premultiplied linear float tint colour. */
+typedef struct miu_color {
+    float r;
+    float g;
+    float b;
+    float a;
+} miu_color;
+
+/** A 2D translation, clockwise rotation in radians, and per-axis scale. */
+typedef struct miu_transform2d {
+    miu_vec2 translation;
+    float rotation_radians;
+    miu_vec2 scale;
+} miu_transform2d;
+
+/** Normalised source rectangle. Reversed bounds intentionally mirror an axis. */
+typedef struct miu_uv_rect {
+    float left;
+    float top;
+    float right;
+    float bottom;
+} miu_uv_rect;
+
+/** Camera transform for the CPU renderer's logical top-left-origin canvas. */
+typedef struct miu_camera2d {
+    miu_vec2 position;
+    miu_vec2 viewport;
+    float zoom;
+    float rotation_radians;
+} miu_camera2d;
+
+/** A textured sprite. Translation identifies the sprite centre in world space. */
+typedef struct miu_cpu_sprite {
+    miu_transform2d transform;
+    miu_uv_rect uv;
+    miu_color color;
+    int32_t layer;
+} miu_cpu_sprite;
+
+/** Opaque CPU texture. Input texture pixels and canvas pixels are premultiplied RGBA8. */
+typedef struct miu_cpu_texture miu_cpu_texture;
+/** Opaque mutable CPU canvas. */
+typedef struct miu_cpu_canvas miu_cpu_canvas;
+
+/**
+ * Creates a CPU texture from row-major premultiplied RGBA8 bytes.
+ *
+ * `rgba_bytes` must have exactly `width * height * 4` readable bytes. On success,
+ * the caller owns `*out_texture` and must release it with `miu_cpu_texture_release`.
+ */
+MIU_API miu_status_t miu_cpu_texture_create_rgba8(
+    uint32_t width,
+    uint32_t height,
+    const uint8_t* rgba_bytes,
+    size_t rgba_byte_count,
+    miu_cpu_texture** out_texture);
+
+/** Releases a CPU texture. It is safe to pass NULL. */
+MIU_API void miu_cpu_texture_release(miu_cpu_texture* texture);
+
+/** Allocates a transparent CPU canvas. */
+MIU_API miu_status_t miu_cpu_canvas_create(
+    uint32_t width,
+    uint32_t height,
+    miu_cpu_canvas** out_canvas);
+
+/** Releases a CPU canvas. It is safe to pass NULL. */
+MIU_API void miu_cpu_canvas_release(miu_cpu_canvas* canvas);
+
+/** Fills a CPU canvas with a premultiplied colour. */
+MIU_API miu_status_t miu_cpu_canvas_clear(miu_cpu_canvas* canvas, miu_rgba8 color);
+
+/** Draws a sprite with nearest-neighbour sampling and premultiplied source-over blending. */
+MIU_API miu_status_t miu_cpu_canvas_draw_sprite(
+    miu_cpu_canvas* canvas,
+    const miu_camera2d* camera,
+    const miu_cpu_sprite* sprite,
+    const miu_cpu_texture* texture);
+
+/**
+ * Copies the canvas to row-major premultiplied RGBA8 bytes.
+ *
+ * `out_rgba_bytes` must provide at least `width * height * 4` writable bytes.
+ */
+MIU_API miu_status_t miu_cpu_canvas_copy_rgba8(
+    const miu_cpu_canvas* canvas,
+    uint8_t* out_rgba_bytes,
+    size_t out_rgba_byte_count);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

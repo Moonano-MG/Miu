@@ -7,11 +7,12 @@ C++ public APIs.
 
 ## v0.2 — command encoding contract
 
-- Add texture, render-target, and frame-lifecycle opaque handles to the C ABI.
+- Add hardware texture, render-target, and frame-lifecycle opaque handles to the
+  C ABI alongside the shipped CPU texture/canvas handles.
 - Define a compact sprite instance layout shared by Rust batch output and C++
-  encoders.
-- Implement a software/mock bridge used by conformance tests, including device
-  creation failure and fallback retry tests.
+  hardware encoders.
+- Add a software/mock bridge conformance suite covering device creation failure
+  and fallback retry tests.
 
 ## v0.3 — desktop baseline
 

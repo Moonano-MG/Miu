@@ -9,6 +9,10 @@
 
 use core::cmp::Ordering;
 
+/// Deterministic CPU rasterizer and CPU texture storage for headless rendering.
+pub mod software;
+pub use software::{Canvas, Rgba8, SoftwareRenderError, Texture, TextureError, TextureStore};
+
 /// Operating-system or browser family used to choose a backend catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]

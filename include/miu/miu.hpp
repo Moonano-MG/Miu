@@ -143,6 +143,146 @@ private:
     miu_renderer* handle_ = nullptr;
 };
 
+/** Direct C++ aliases for CPU rasterizer descriptors in the stable C ABI. */
+using CpuPixel = miu_rgba8;
+using CpuCamera = miu_camera2d;
+using CpuSprite = miu_cpu_sprite;
+
+/** Move-only CPU texture used by the deterministic reference renderer. */
+class CpuTexture final {
+public:
+    CpuTexture() noexcept = default;
+    CpuTexture(const CpuTexture&) = delete;
+    CpuTexture& operator=(const CpuTexture&) = delete;
+
+    CpuTexture(CpuTexture&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+
+    CpuTexture& operator=(CpuTexture&& other) noexcept {
+        if (this != &other) {
+            reset();
+            handle_ = std::exchange(other.handle_, nullptr);
+        }
+        return *this;
+    }
+
+    ~CpuTexture() { reset(); }
+
+    /** Creates a texture from tightly packed premultiplied RGBA8 pixels. */
+    [[nodiscard]] static CpuTexture create(
+        std::uint32_t width,
+        std::uint32_t height,
+        const std::vector<std::uint8_t>& rgba_bytes,
+        Status* out_status = nullptr) noexcept {
+        miu_cpu_texture* handle = nullptr;
+        const auto raw_status = miu_cpu_texture_create_rgba8(
+            width,
+            height,
+            rgba_bytes.empty() ? nullptr : rgba_bytes.data(),
+            rgba_bytes.size(),
+            &handle);
+        if (out_status != nullptr) {
+            *out_status = static_cast<Status>(raw_status);
+        }
+        return CpuTexture(raw_status == MIU_STATUS_OK ? handle : nullptr);
+    }
+
+    [[nodiscard]] bool valid() const noexcept { return handle_ != nullptr; }
+
+    void reset() noexcept {
+        miu_cpu_texture_release(std::exchange(handle_, nullptr));
+    }
+
+private:
+    friend class CpuCanvas;
+    explicit CpuTexture(miu_cpu_texture* handle) noexcept : handle_(handle) {}
+    miu_cpu_texture* handle_ = nullptr;
+};
+
+/** Move-only CPU canvas for deterministic headless 2D rendering. */
+class CpuCanvas final {
+public:
+    CpuCanvas() noexcept = default;
+    CpuCanvas(const CpuCanvas&) = delete;
+    CpuCanvas& operator=(const CpuCanvas&) = delete;
+
+    CpuCanvas(CpuCanvas&& other) noexcept
+        : handle_(std::exchange(other.handle_, nullptr)),
+          width_(std::exchange(other.width_, 0U)),
+          height_(std::exchange(other.height_, 0U)) {}
+
+    CpuCanvas& operator=(CpuCanvas&& other) noexcept {
+        if (this != &other) {
+            reset();
+            handle_ = std::exchange(other.handle_, nullptr);
+            width_ = std::exchange(other.width_, 0U);
+            height_ = std::exchange(other.height_, 0U);
+        }
+        return *this;
+    }
+
+    ~CpuCanvas() { reset(); }
+
+    /** Allocates a transparent canvas of `width` by `height` logical pixels. */
+    [[nodiscard]] static CpuCanvas create(
+        std::uint32_t width,
+        std::uint32_t height,
+        Status* out_status = nullptr) noexcept {
+        miu_cpu_canvas* handle = nullptr;
+        const auto raw_status = miu_cpu_canvas_create(width, height, &handle);
+        if (out_status != nullptr) {
+            *out_status = static_cast<Status>(raw_status);
+        }
+        return CpuCanvas(raw_status == MIU_STATUS_OK ? handle : nullptr, width, height);
+    }
+
+    [[nodiscard]] bool valid() const noexcept { return handle_ != nullptr; }
+    [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
+    [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
+
+    [[nodiscard]] Status clear(CpuPixel color) noexcept {
+        if (handle_ == nullptr) {
+            return Status::InvalidArgument;
+        }
+        return static_cast<Status>(miu_cpu_canvas_clear(handle_, color));
+    }
+
+    [[nodiscard]] Status draw(
+        const CpuCamera& camera,
+        const CpuSprite& sprite,
+        const CpuTexture& texture) noexcept {
+        if (handle_ == nullptr || !texture.valid()) {
+            return Status::InvalidArgument;
+        }
+        return static_cast<Status>(
+            miu_cpu_canvas_draw_sprite(handle_, &camera, &sprite, texture.handle_));
+    }
+
+    /** Copies canvas pixels into a caller-owned tightly packed RGBA8 vector. */
+    [[nodiscard]] Status copy_rgba8(std::vector<std::uint8_t>* out_pixels) const {
+        if (handle_ == nullptr || out_pixels == nullptr) {
+            return Status::InvalidArgument;
+        }
+        const auto byte_count = static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_) * 4U;
+        out_pixels->resize(byte_count);
+        return static_cast<Status>(miu_cpu_canvas_copy_rgba8(
+            handle_, out_pixels->data(), out_pixels->size()));
+    }
+
+    void reset() noexcept {
+        miu_cpu_canvas_release(std::exchange(handle_, nullptr));
+        width_ = 0U;
+        height_ = 0U;
+    }
+
+private:
+    CpuCanvas(miu_cpu_canvas* handle, std::uint32_t width, std::uint32_t height) noexcept
+        : handle_(handle), width_(width), height_(height) {}
+
+    miu_cpu_canvas* handle_ = nullptr;
+    std::uint32_t width_ = 0U;
+    std::uint32_t height_ = 0U;
+};
+
 }  // namespace miu
 
 #endif  // MIU_MIU_HPP

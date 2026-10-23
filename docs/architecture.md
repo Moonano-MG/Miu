@@ -16,11 +16,13 @@ include/miu/miu.h  ────────── stable C ABI ─────�
 native/ C++ bridge ◄── host-specific probes / API adapters ──► GPU API
 ```
 
-Rust must not own window handles or expose platform SDK handles across the ABI. It
-can therefore be tested identically on every target. The C++ bridge owns platform
-headers, C++ library compatibility adapters, and the actual graphics-device
-lifetime. The ABI currently preserves a selected `RenderPlan`; command encoders
-will be added behind this same boundary rather than leaking backend objects.
+Rust does not own window handles or expose platform SDK handles across the ABI.
+It can therefore be tested identically on every target. The C++ bridge owns
+platform headers, C++ library compatibility adapters, and the actual
+hardware-graphics-device lifetime. The ABI preserves a selected `RenderPlan` and
+also exposes a deterministic CPU texture/canvas renderer. Future hardware command
+encoders will be added behind this same boundary rather than leaking backend
+objects.
 
 ## Selection sequence
 
@@ -50,6 +52,12 @@ content: it orders by layer and preserves submission order within a layer. Use
 `BatchMode::Opaque` only where overlap ordering is irrelevant; it sorts texture
 state within each layer and emits fewer `DrawBatch` ranges. A backend encoder
 binds the batch texture once and writes the contiguous instances in each range.
+
+`Canvas`, `Texture`, and `TextureStore` implement that same command stream with a
+deterministic CPU backend. It supports nearest-neighbour UV sampling, sprite
+translation/rotation/scale including mirroring, premultiplied source-over blending,
+and a validated camera inverse. The C ABI, C++ wrapper, and C# binding expose CPU
+texture/canvas lifetime and drawing calls for headless test tools and previews.
 
 ## Compatibility contract
 

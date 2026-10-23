@@ -8,8 +8,9 @@ Miu 是一个跨平台的通用 2D 渲染器基础工程：**Rust** 负责可测
 - 声明项目最低档位、优选档位、严格选择和必须显式开启的强制运行；
 - `Camera2D` 的平移、缩放、旋转和屏幕/世界坐标反变换；
 - 保持透明绘制顺序的批处理和适用于不透明内容的纹理排序批处理；
+- 支持预乘 RGBA8、旋转/缩放/UV/alpha 混合的确定性 CPU 参考渲染器，可用于无窗口测试、预览和工具；
 - C ABI、C++17 RAII 包装、无 NuGet 依赖的 C# P/Invoke 包装和 C++ 平台桥接契约。
 
-它**还不是完整 GPU 命令编码器**。真实的 Direct2D、D3D、Vulkan、Metal、OpenGL 与 Web 实现应放在 `native/` 的平台桥接层中；当前桥接层不会伪造设备支持情况。应用只有在成功创建对应 API 后，才能把该 API 加入 capability report。
+它**还不是完整 GPU 命令编码器**。CPU 渲染器已经可用；真实的 Direct2D、D3D、Vulkan、Metal、OpenGL 与 Web 实现应放在 `native/` 的平台桥接层中。当前桥接层不会伪造设备支持情况：应用只有在成功创建对应 API 后，才能把该 API 加入 capability report。
 
 详细的英文构建、档位表与示例见 [README.md](README.md)；边界与选择流程见 [docs/architecture.md](docs/architecture.md)。

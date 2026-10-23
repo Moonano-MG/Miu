@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [arena/2302db0b-miu]
   pull_request:
 
 permissions:
@@ -16,14 +15,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.75.0
-      - name: Test Rust policy and ABI crates
+      - name: Test Rust policy, CPU renderer, and ABI crates
         run: cargo test --workspace --all-targets
       - name: Configure C++ bridge
         run: cmake -S . -B build -DMIU_BUILD_NATIVE_BRIDGE=ON
       - name: Build C++ bridge
         run: cmake --build build --config Release
-      - name: Syntax-check C++ public API sample
-        run: c++ -std=c++17 -Wall -Wextra -Werror -Iinclude -Inative/include -c samples/cpp/minimal.cpp -o /tmp/miu-minimal.o
+      - name: Syntax-check C++ public API samples
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Iinclude -Inative/include -c samples/cpp/minimal.cpp -o /tmp/miu-minimal.o
+          c++ -std=c++17 -Wall -Wextra -Werror -Iinclude -Inative/include -c samples/cpp/software_canvas.cpp -o /tmp/miu-software-canvas.o
 
   csharp-binding:
     runs-on: ubuntu-latest
@@ -32,5 +33,5 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-      - name: Build C# binding
+      - name: Build C# bindings
         run: dotnet build bindings/csharp/Miu.csproj --configuration Release
