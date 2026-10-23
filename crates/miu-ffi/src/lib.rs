@@ -4,6 +4,8 @@
 //! it validates a capability report and keeps the immutable selected render plan.
 
 #![deny(unsafe_op_in_unsafe_fn)]
+// The public ABI is documented in include/miu/miu.h rather than duplicated here.
+#![allow(missing_docs)]
 
 use core::ptr;
 use miu_core::{
@@ -18,7 +20,7 @@ const STATUS_INVALID_ARGUMENT: u32 = 1;
 const STATUS_UNSUPPORTED: u32 = 2;
 
 #[repr(C)]
-struct MiuDeviceCapabilities {
+pub struct MiuDeviceCapabilities {
     abi_version: u32,
     platform: u8,
     reserved: [u8; 3],
@@ -27,7 +29,7 @@ struct MiuDeviceCapabilities {
 }
 
 #[repr(C)]
-struct MiuRendererRequest {
+pub struct MiuRendererRequest {
     abi_version: u32,
     minimum_tier: u8,
     preferred_tier: u8,
@@ -37,7 +39,7 @@ struct MiuRendererRequest {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct MiuRenderPlan {
+pub struct MiuRenderPlan {
     backend: u8,
     tier: u8,
     emergency_fallback: u8,
@@ -45,13 +47,13 @@ struct MiuRenderPlan {
 }
 
 #[repr(C)]
-struct MiuRenderer {
+pub struct MiuRenderer {
     plan: MiuRenderPlan,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct MiuRgba8 {
+pub struct MiuRgba8 {
     r: u8,
     g: u8,
     b: u8,
@@ -60,14 +62,14 @@ struct MiuRgba8 {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct MiuVec2 {
+pub struct MiuVec2 {
     x: f32,
     y: f32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct MiuColor {
+pub struct MiuColor {
     r: f32,
     g: f32,
     b: f32,
@@ -76,7 +78,7 @@ struct MiuColor {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct MiuTransform2D {
+pub struct MiuTransform2D {
     translation: MiuVec2,
     rotation_radians: f32,
     scale: MiuVec2,
@@ -84,7 +86,7 @@ struct MiuTransform2D {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct MiuUvRect {
+pub struct MiuUvRect {
     left: f32,
     top: f32,
     right: f32,
@@ -93,7 +95,7 @@ struct MiuUvRect {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct MiuCamera2D {
+pub struct MiuCamera2D {
     position: MiuVec2,
     viewport: MiuVec2,
     zoom: f32,
@@ -102,7 +104,7 @@ struct MiuCamera2D {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct MiuCpuSprite {
+pub struct MiuCpuSprite {
     transform: MiuTransform2D,
     uv: MiuUvRect,
     color: MiuColor,
@@ -110,12 +112,12 @@ struct MiuCpuSprite {
 }
 
 #[repr(C)]
-struct MiuCpuTexture {
+pub struct MiuCpuTexture {
     texture: Texture,
 }
 
 #[repr(C)]
-struct MiuCpuCanvas {
+pub struct MiuCpuCanvas {
     canvas: Canvas,
 }
 
