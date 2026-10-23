@@ -188,7 +188,7 @@ impl RendererRequest {
     ///
     /// Returns [`RequestError::PreferredBelowMinimum`] when the request would be
     /// internally inconsistent.
-    pub const fn with_preferred_tier(
+    pub fn with_preferred_tier(
         mut self,
         preferred_tier: RenderTier,
     ) -> Result<Self, RequestError> {
