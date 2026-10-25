@@ -1,0 +1,12 @@
+/target/
+/zig-out/
+/build/
+/out/
+*.dll
+*.dylib
+*.so
+*.a
+*.lib
+*.pdb
+*.user
+.vs/
