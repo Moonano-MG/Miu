@@ -198,7 +198,7 @@ impl DeviceCapabilities {
 pub struct RendererRequest {
     /// Lowest tier the project declares as supported.
     pub minimum_tier: RenderTier,
-    /// Tier selected first when several compliant profiles are available.
+    /// Compliant tier selected first; higher tiers are considered only if it cannot run.
     pub preferred_tier: RenderTier,
 }
 
@@ -322,6 +322,13 @@ pub fn select_best_effort(
     device: &DeviceCapabilities,
     request: &RendererRequest,
 ) -> Result<RenderPlan, SelectionError> {
+    if let Err(error) = request.validate() {
+        return Err(SelectionError {
+            minimum_tier: request.minimum_tier,
+            attempted: Vec::new(),
+            invalid_request: Some(error),
+        });
+    }
     if let Ok(plan) = select_renderer(device, request) {
         return Ok(plan);
     }
@@ -407,12 +414,18 @@ fn emergency_profiles_for(platform: Platform) -> &'static [Profile] {
 
 fn normal_candidates(platform: Platform, request: &RendererRequest) -> Vec<Profile> {
     let mut candidates = Vec::new();
-    // A declared minimum is a floor: choose the strongest compliant profile first.
-    // `preferred_tier` remains validated request metadata for hosts that want to
-    // present a user setting, but never causes automatic downgrade below a stronger
-    // available profile.
-    for profile in profiles_for(platform).iter().rev() {
-        if profile.tier >= request.minimum_tier
+    let profiles = profiles_for(platform);
+    // Honour an application's selected performance/quality target first. Within
+    // that tier prefer the strongest API profile; only when it cannot be used do
+    // we move upward to a stronger tier.
+    for profile in profiles.iter().rev() {
+        if profile.tier == request.preferred_tier && profile.tier >= request.minimum_tier {
+            candidates.push(*profile);
+        }
+    }
+    for profile in profiles.iter().rev() {
+        if profile.tier > request.preferred_tier
+            && profile.tier >= request.minimum_tier
             && !candidates.iter().any(|candidate: &Profile| candidate.backend == profile.backend)
         {
             candidates.push(*profile);
@@ -625,8 +638,9 @@ impl UvRect {
 
 /// Pixel source rectangle inside a texture atlas.
 ///
-/// A zero width and height selects the entire texture for backwards-compatible
-/// full-texture sprites. Atlas users should always provide explicit dimensions.
+/// Only the all-zero sentinel `{ x: 0, y: 0, width: 0, height: 0 }` selects the
+/// entire texture for backwards-compatible full-texture sprites. Atlas users
+/// should always provide explicit dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct SourceRect {
@@ -634,9 +648,9 @@ pub struct SourceRect {
     pub x: u32,
     /// Top source texel.
     pub y: u32,
-    /// Source width in texels, or zero together with `height` for the full texture.
+    /// Source width in texels, or zero only in the all-zero full-texture sentinel.
     pub width: u32,
-    /// Source height in texels, or zero together with `width` for the full texture.
+    /// Source height in texels, or zero only in the all-zero full-texture sentinel.
     pub height: u32,
 }
 
@@ -810,15 +824,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn target_tier_is_preferred_but_a_higher_supported_tier_is_accepted() {
+    fn preferred_tier_is_selected_before_a_higher_tier() {
         let device = DeviceCapabilities::for_platform(Platform::Windows)
+            .with_backend(Backend::Direct3D113)
             .with_backend(Backend::Direct3D12);
         let request = RendererRequest::new(RenderTier::Balanced);
-        let plan = select_renderer(&device, &request).expect("D3D12 is a compliant option");
-        assert_eq!(plan.backend, Backend::Direct3D12);
-        assert_eq!(plan.profile_backend, Backend::Direct3D12);
-        assert_eq!(plan.tier, RenderTier::Premium);
+        let plan = select_renderer(&device, &request).expect("D3D 11.3 is the preferred target");
+        assert_eq!(plan.backend, Backend::Direct3D113);
+        assert_eq!(plan.profile_backend, Backend::Direct3D113);
+        assert_eq!(plan.tier, RenderTier::Balanced);
         assert!(!plan.requires_force_run_warning());
+    }
+
+    #[test]
+    fn higher_tier_is_used_when_preferred_tier_is_unavailable() {
+        let device = DeviceCapabilities::for_platform(Platform::Windows)
+            .with_backend(Backend::Direct3D12);
+        let plan = select_renderer(&device, &RendererRequest::new(RenderTier::Balanced))
+            .expect("premium backend is a valid upward fallback");
+        assert_eq!(plan.backend, Backend::Direct3D12);
+        assert_eq!(plan.tier, RenderTier::Premium);
     }
 
     #[test]
@@ -862,10 +887,10 @@ mod tests {
         let device = DeviceCapabilities::for_platform(Platform::Linux)
             .with_backend(Backend::Vulkan14);
         let request = RendererRequest::new(RenderTier::Balanced);
-        let plan = select_renderer(&device, &request).expect("Vulkan 1.4 satisfies premium Vulkan 1.3");
+        let plan = select_renderer(&device, &request).expect("Vulkan 1.4 satisfies the preferred balanced profile");
         assert_eq!(plan.profile_backend, Backend::Vulkan13);
         assert_eq!(plan.backend, Backend::Vulkan14);
-        assert_eq!(plan.tier, RenderTier::Premium);
+        assert_eq!(plan.tier, RenderTier::Balanced);
     }
 
     #[test]
@@ -874,9 +899,9 @@ mod tests {
             .with_backend(Backend::Metal3);
         let plan = select_renderer(&device, &RendererRequest::new(RenderTier::Compatibility))
             .expect("Metal 3 is a compliant actual backend");
-        assert_eq!(plan.profile_backend, Backend::Metal3);
+        assert_eq!(plan.profile_backend, Backend::Metal2);
         assert_eq!(plan.backend, Backend::Metal3);
-        assert_eq!(plan.tier, RenderTier::Premium);
+        assert_eq!(plan.tier, RenderTier::Compatibility);
     }
 
     #[test]
@@ -887,6 +912,17 @@ mod tests {
         };
         let error = select_renderer(&DeviceCapabilities::for_platform(Platform::Linux), &request)
             .expect_err("inconsistent public fields must not select");
+        assert_eq!(error.invalid_request, Some(RequestError::PreferredBelowMinimum));
+    }
+
+    #[test]
+    fn best_effort_rejects_invalid_public_request_fields() {
+        let request = RendererRequest {
+            minimum_tier: RenderTier::Premium,
+            preferred_tier: RenderTier::Compatibility,
+        };
+        let error = select_best_effort(&DeviceCapabilities::for_platform(Platform::Linux), &request)
+            .expect_err("best effort must never bypass invalid request validation");
         assert_eq!(error.invalid_request, Some(RequestError::PreferredBelowMinimum));
     }
 

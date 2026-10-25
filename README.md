@@ -7,7 +7,7 @@
 ## Design goals
 
 - **Pragmatic 2D:** transforms, independent `Camera2D`, sprites, draw ordering, and batching are first-class.
-- **Tiered deployment:** compatibility, balanced, and premium renderer tiers select the strongest usable backend at or above an application's declared minimum.
+- **Tiered deployment:** compatibility, balanced, and premium tiers honour the host's preferred compliant tier first, escalating only when that tier cannot run.
 - **Predictable failures:** unsupported hardware is reported before a renderer is created; an application may explicitly choose a best-effort run.
 - **Portable boundary:** Rust owns policy and frame preparation. C++ owns platform probes and compatibility-library bridges. C++ and C# call the same versioned C ABI.
 - **No hidden platform fallback:** a fallback is part of the returned render plan and can be displayed in application UI or telemetry.
@@ -52,6 +52,8 @@ tests, samples, and platform validation are run explicitly by maintainers. The R
 workspace needs Rust 1.75 or newer:
 
 ```sh
+./scripts/verify-manually.sh
+# or run individual commands:
 cargo test --workspace
 cargo build -p miu-ffi --release
 ```
@@ -80,7 +82,11 @@ Web builds should probe WebGPU first for the premium tier and WebGL for lower ti
 
 ## Project requirement policy
 
-Choose the lowest tier your project supports (`Compatibility`, `Balanced`, or `Premium`). Miu selects the strongest compliant profile at or above the declared minimum and records both the profile requirement and the actual device API. If no compliant plan exists, the result contains all attempted candidates. Calling the explicit force/best-effort entry point permits an emergency candidate and marks the plan unsafe so the host can warn users that a crash or degraded rendering is possible.
+Choose the lowest tier your project supports (`Compatibility`, `Balanced`, or `Premium`) and a preferred compliant tier. Miu tries the preferred tier first (using the strongest API profile within that tier), then escalates only to stronger tiers when the preference cannot run. The plan records both the profile requirement and actual device API. Invalid public requests, including a preference below the minimum, are rejected even in best-effort mode. If no compliant plan exists, Rust reports all attempted candidates. Calling the explicit force/best-effort entry point permits an emergency candidate and marks the plan unsafe so the host can warn users that a crash or degraded rendering is possible.
+
+CPU textures, canvas clears, and output pixels use premultiplied RGBA8. Supply already-premultiplied data to `Texture::new` / `miu_cpu_texture_create_rgba8`, or choose the explicit straight-alpha conversion API (`Texture::from_straight_alpha` / `miu_cpu_texture_create_straight_rgba8`). Source UV sampling is clamped to the selected atlas source rectangle, so it cannot bleed into adjacent atlas entries.
+
+See [ABI v2 migration](docs/abi-v2-migration.md) before updating native bindings.
 
 ## License
 

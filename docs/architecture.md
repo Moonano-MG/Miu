@@ -29,8 +29,10 @@ objects.
 1. The host creates its window/surface and probes APIs it can genuinely initialise.
 2. It reports only successful probes as `DeviceCapabilities` / `CapabilityReport`.
 3. The application supplies a minimum tier and an optional preferred tier.
-4. `select_renderer` selects only profiles at or above the minimum. An unavailable
-   result includes an ordered attempted list in Rust for diagnostics.
+4. `select_renderer` first tries the requested preferred tier (when it is at or
+   above the minimum), choosing its strongest profile, and only then escalates to
+   stronger tiers. Invalid requests are rejected by strict and best-effort paths.
+   An unavailable result includes an ordered attempted list in Rust for diagnostics.
 5. Only after user confirmation, `select_best_effort` may choose a lower profile or
    an emergency fallback. The returned plan is marked so the warning cannot be
    lost.
@@ -54,15 +56,30 @@ state within each layer and emits fewer `DrawBatch` ranges. A backend encoder
 binds the batch texture once and writes the contiguous instances in each range.
 
 `Canvas`, `Texture`, and `TextureStore` implement that same command stream with a
-deterministic CPU backend. It supports nearest-neighbour UV sampling, sprite
-translation/rotation/scale including mirroring, premultiplied source-over blending,
-and a validated camera inverse. The C ABI, C++ wrapper, and C# binding expose CPU
-texture/canvas lifetime and drawing calls for headless test tools and previews.
+deterministic CPU backend. It supports nearest-neighbour UV sampling constrained to
+the selected source rectangle, sprite translation/rotation/scale including
+mirroring, premultiplied source-over blending, and a validated camera inverse.
+Texture input and clear colours are rejected unless premultiplied; explicit
+straight-alpha conversion helpers are provided. The C ABI, C++ wrapper, and C#
+binding expose CPU texture/canvas lifetime and drawing calls for headless test
+tools and previews.
 
 ## Compatibility contract
 
-The C ABI uses only fixed-width scalar fields and an opaque pointer. Each inbound
-struct includes `abi_version`; v0.1 rejects any other value. Adding functions is
-backward-compatible, but changing a field layout requires an ABI-version bump and
-a new structure/function rather than reinterpreting old memory. C++ and C# use
-exactly this header layout.
+The C ABI uses only fixed-width scalar fields and opaque pointers. ABI v1
+structures and unsuffixed functions remain binary-safe: `miu_render_plan` stays
+four bytes and `miu_cpu_canvas_draw_sprite` consumes the original 56-byte sprite
+descriptor. ABI v2 additions use `miu_render_plan_v2`,
+`miu_renderer_get_plan_v2`, `miu_cpu_sprite_v2`, and
+`miu_cpu_canvas_draw_sprite_v2`; they are never interpreted through v1 pointers.
+
+Call `miu_abi_version()` and `miu_abi_min_supported_version()` before using v2.
+The C++ and C# wrappers do this at runtime and also guard their v2 descriptor
+sizes. The selector accepts the unchanged v1 policy input layout for legacy
+callers, while new bindings send ABI v2 and use only suffixed v2 output calls.
+The complete source/binary migration rules are in
+[ABI v2 migration](abi-v2-migration.md).
+
+Manual validation is deliberately tracked in `scripts/verify-manually.sh` rather
+than GitHub Actions; it compiles ABI layout guards, C/C++ public surfaces, Rust,
+and (when installed) the C# binding.

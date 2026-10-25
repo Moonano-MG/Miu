@@ -16,6 +16,10 @@ use miu_core::{
 };
 
 const ABI_VERSION: u32 = 2;
+const ABI_MIN_SUPPORTED_VERSION: u32 = 1;
+// Backend IDs are a closed u8 enum from 1 through 17. Bound hostile FFI reports
+// before constructing a slice or iterating untrusted caller memory.
+const MAX_BACKEND_REPORT: usize = 17;
 const STATUS_OK: u32 = 0;
 const STATUS_INVALID_ARGUMENT: u32 = 1;
 const STATUS_UNSUPPORTED: u32 = 2;
@@ -41,7 +45,7 @@ pub struct MiuRendererRequest {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct MiuRenderPlan {
+pub struct MiuRenderPlanV2 {
     backend: u8,
     profile_backend: u8,
     tier: u8,
@@ -49,9 +53,19 @@ pub struct MiuRenderPlan {
     below_minimum: u8,
 }
 
+/// ABI v1 layout retained for the unsuffixed plan getter.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct MiuRenderPlan {
+    backend: u8,
+    tier: u8,
+    emergency_fallback: u8,
+    below_minimum: u8,
+}
+
 #[repr(C)]
 pub struct MiuRenderer {
-    plan: MiuRenderPlan,
+    plan: MiuRenderPlanV2,
 }
 
 #[repr(C)]
@@ -116,12 +130,22 @@ pub struct MiuCamera2D {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct MiuCpuSprite {
+pub struct MiuCpuSpriteV2 {
     transform: MiuTransform2D,
     source: MiuSourceRect,
     uv: MiuUvRect,
     size: MiuVec2,
     pivot: MiuVec2,
+    color: MiuColor,
+    layer: i32,
+}
+
+/// ABI v1 sprite layout retained by `miu_cpu_canvas_draw_sprite`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MiuCpuSprite {
+    transform: MiuTransform2D,
+    uv: MiuUvRect,
     color: MiuColor,
     layer: i32,
 }
@@ -167,7 +191,7 @@ const fn camera_from_ffi(value: MiuCamera2D) -> Camera2D {
     }
 }
 
-const fn sprite_from_ffi(value: MiuCpuSprite) -> Sprite {
+const fn sprite_from_ffi(value: MiuCpuSpriteV2) -> Sprite {
     Sprite {
         texture: 0,
         transform: Transform2D {
@@ -265,8 +289,8 @@ const fn tier_from_ffi(value: u8) -> Option<RenderTier> {
     }
 }
 
-const fn plan_to_ffi(plan: RenderPlan) -> MiuRenderPlan {
-    MiuRenderPlan {
+const fn plan_to_ffi(plan: RenderPlan) -> MiuRenderPlanV2 {
+    MiuRenderPlanV2 {
         backend: plan.backend as u8,
         profile_backend: plan.profile_backend as u8,
         tier: plan.tier as u8,
@@ -275,10 +299,25 @@ const fn plan_to_ffi(plan: RenderPlan) -> MiuRenderPlan {
     }
 }
 
+const fn plan_to_ffi_v1(plan: MiuRenderPlanV2) -> MiuRenderPlan {
+    MiuRenderPlan {
+        backend: plan.backend,
+        tier: plan.tier,
+        emergency_fallback: plan.emergency_fallback,
+        below_minimum: plan.below_minimum,
+    }
+}
+
 /// Returns the ABI version implemented by this library.
 #[no_mangle]
 pub extern "C" fn miu_abi_version() -> u32 {
     ABI_VERSION
+}
+
+/// Returns the oldest revision implemented by legacy entry points.
+#[no_mangle]
+pub extern "C" fn miu_abi_min_supported_version() -> u32 {
+    ABI_MIN_SUPPORTED_VERSION
 }
 
 /// Creates a policy-renderer handle from a platform capability report.
@@ -306,7 +345,13 @@ pub unsafe extern "C" fn miu_renderer_create(
     let capabilities = unsafe { &*capabilities };
     // SAFETY: null was checked above; the caller contract requires a valid object.
     let request = unsafe { &*request };
-    if capabilities.abi_version != ABI_VERSION || request.abi_version != ABI_VERSION {
+    // v1 and v2 use identical inbound policy descriptors. Keep accepting v1
+    // callers while v2 callers use the versioned result getter below.
+    if capabilities.abi_version != request.abi_version
+        || !(ABI_MIN_SUPPORTED_VERSION..=ABI_VERSION).contains(&capabilities.abi_version)
+        || capabilities.reserved != [0; 3]
+        || request.reserved != 0
+    {
         return STATUS_INVALID_ARGUMENT;
     }
 
@@ -322,8 +367,16 @@ pub unsafe extern "C" fn miu_renderer_create(
     let Ok(renderer_request) = RendererRequest::new(minimum_tier).with_preferred_tier(preferred_tier) else {
         return STATUS_INVALID_ARGUMENT;
     };
+    if request.allow_best_effort > 1 {
+        return STATUS_INVALID_ARGUMENT;
+    }
 
     if capabilities.backend_count != 0 && capabilities.backends.is_null() {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    if capabilities.backend_count > MAX_BACKEND_REPORT
+        || capabilities.backend_count > isize::MAX as usize
+    {
         return STATUS_INVALID_ARGUMENT;
     }
     let raw_backends = if capabilities.backend_count == 0 {
@@ -373,6 +426,29 @@ pub unsafe extern "C" fn miu_renderer_get_plan(
     if !out_plan.is_null() {
         // SAFETY: a non-null output pointer is writable by the C ABI contract.
         unsafe { ptr::write(out_plan, MiuRenderPlan::default()) };
+    }
+    if renderer.is_null() || out_plan.is_null() {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    // SAFETY: required by this function's caller contract after null validation.
+    let plan = plan_to_ffi_v1(unsafe { (*renderer).plan });
+    // SAFETY: required by this function's caller contract after null validation.
+    unsafe { ptr::write(out_plan, plan) };
+    STATUS_OK
+}
+
+/// Copies a complete ABI v2 plan without changing the ABI v1 symbol or layout.
+///
+/// # Safety
+/// `renderer` must be live and `out_plan` must be writable for one v2 plan.
+#[no_mangle]
+pub unsafe extern "C" fn miu_renderer_get_plan_v2(
+    renderer: *const MiuRenderer,
+    out_plan: *mut MiuRenderPlanV2,
+) -> u32 {
+    if !out_plan.is_null() {
+        // SAFETY: a non-null output pointer is writable by the C ABI contract.
+        unsafe { ptr::write(out_plan, MiuRenderPlanV2::default()) };
     }
     if renderer.is_null() || out_plan.is_null() {
         return STATUS_INVALID_ARGUMENT;
@@ -437,6 +513,58 @@ pub unsafe extern "C" fn miu_cpu_texture_create_rgba8(
         pixels.push(Rgba8 { r: pixel[0], g: pixel[1], b: pixel[2], a: pixel[3] });
     }
     let texture = match Texture::new(width, height, pixels) {
+        Ok(texture) => texture,
+        Err(miu_core::TextureError::OutOfMemory) => return STATUS_OUT_OF_MEMORY,
+        Err(_) => return STATUS_INVALID_ARGUMENT,
+    };
+    // SAFETY: allocation returns either an owned handle or a null pointer.
+    let Some(texture) = (unsafe { try_allocate_handle(MiuCpuTexture { texture }) }) else {
+        return STATUS_OUT_OF_MEMORY;
+    };
+    // SAFETY: out_texture was null-checked and is writable by the caller contract.
+    unsafe { ptr::write(out_texture, texture) };
+    STATUS_OK
+}
+
+/// Creates a CPU texture from explicitly straight-alpha RGBA8 bytes.
+///
+/// # Safety
+/// The pointer/count and output-pointer requirements match
+/// [`miu_cpu_texture_create_rgba8`].
+#[no_mangle]
+pub unsafe extern "C" fn miu_cpu_texture_create_straight_rgba8(
+    width: u32,
+    height: u32,
+    rgba_bytes: *const u8,
+    rgba_byte_count: usize,
+    out_texture: *mut *mut MiuCpuTexture,
+) -> u32 {
+    if !out_texture.is_null() {
+        // SAFETY: a non-null output pointer is writable by the C ABI contract.
+        unsafe { ptr::write(out_texture, ptr::null_mut()) };
+    }
+    if width == 0 || height == 0 {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    let Some(expected_length) = rgba_byte_length(width, height) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    if out_texture.is_null()
+        || rgba_byte_count != expected_length
+        || (expected_length != 0 && rgba_bytes.is_null())
+    {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    // SAFETY: pointer/count validity is required by the function contract.
+    let bytes = unsafe { core::slice::from_raw_parts(rgba_bytes, expected_length) };
+    let mut pixels = Vec::new();
+    if pixels.try_reserve_exact(expected_length / 4).is_err() {
+        return STATUS_OUT_OF_MEMORY;
+    }
+    for pixel in bytes.chunks_exact(4) {
+        pixels.push(Rgba8 { r: pixel[0], g: pixel[1], b: pixel[2], a: pixel[3] });
+    }
+    let texture = match Texture::from_straight_alpha(width, height, pixels) {
         Ok(texture) => texture,
         Err(miu_core::TextureError::OutOfMemory) => return STATUS_OUT_OF_MEMORY,
         Err(_) => return STATUS_INVALID_ARGUMENT,
@@ -522,8 +650,10 @@ pub unsafe extern "C" fn miu_cpu_canvas_clear(
         return STATUS_INVALID_ARGUMENT;
     }
     // SAFETY: required by this function's caller contract after null validation.
-    unsafe { (*canvas).canvas.clear(rgba8_from_ffi(color)) };
-    STATUS_OK
+    match unsafe { (*canvas).canvas.clear(rgba8_from_ffi(color)) } {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_INVALID_ARGUMENT,
+    }
 }
 
 /// Draws one transformed sprite to a CPU canvas.
@@ -533,10 +663,10 @@ pub unsafe extern "C" fn miu_cpu_canvas_clear(
 /// Every pointer must be non-null and refer to a live handle or readable structure
 /// for the duration of this call.
 #[no_mangle]
-pub unsafe extern "C" fn miu_cpu_canvas_draw_sprite(
+pub unsafe extern "C" fn miu_cpu_canvas_draw_sprite_v2(
     canvas: *mut MiuCpuCanvas,
     camera: *const MiuCamera2D,
-    sprite: *const MiuCpuSprite,
+    sprite: *const MiuCpuSpriteV2,
     texture: *const MiuCpuTexture,
 ) -> u32 {
     if canvas.is_null() || camera.is_null() || sprite.is_null() || texture.is_null() {
@@ -554,6 +684,35 @@ pub unsafe extern "C" fn miu_cpu_canvas_draw_sprite(
         Ok(()) => STATUS_OK,
         Err(_) => STATUS_INVALID_ARGUMENT,
     }
+}
+
+/// Draws an ABI v1 sprite without reinterpreting its shorter descriptor as v2.
+///
+/// # Safety
+/// Every pointer must be non-null and valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn miu_cpu_canvas_draw_sprite(
+    canvas: *mut MiuCpuCanvas,
+    camera: *const MiuCamera2D,
+    sprite: *const MiuCpuSprite,
+    texture: *const MiuCpuTexture,
+) -> u32 {
+    if sprite.is_null() {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    // SAFETY: `sprite` was checked and is readable by the function contract.
+    let legacy = unsafe { *sprite };
+    let v2 = MiuCpuSpriteV2 {
+        transform: legacy.transform,
+        source: MiuSourceRect { x: 0, y: 0, width: 0, height: 0 },
+        uv: legacy.uv,
+        size: MiuVec2 { x: 0.0, y: 0.0 },
+        pivot: MiuVec2 { x: 0.5, y: 0.5 },
+        color: legacy.color,
+        layer: legacy.layer,
+    };
+    // SAFETY: the other pointer requirements are forwarded unchanged; `v2` is live.
+    unsafe { miu_cpu_canvas_draw_sprite_v2(canvas, camera, &v2, texture) }
 }
 
 /// Copies a CPU canvas as row-major premultiplied RGBA8 bytes.
@@ -623,6 +782,20 @@ mod tests {
     }
 
     #[test]
+    fn ffi_best_effort_cannot_bypass_an_invalid_request() {
+        let capabilities = caps(&[11]);
+        let mut invalid_request = request(3, 1);
+        invalid_request.preferred_tier = 1;
+        let mut renderer = ptr::null_mut();
+        // SAFETY: local inputs are valid ABI objects; only policy fields conflict.
+        assert_eq!(
+            unsafe { miu_renderer_create(&capabilities, &invalid_request, &mut renderer) },
+            STATUS_INVALID_ARGUMENT
+        );
+        assert!(renderer.is_null());
+    }
+
+    #[test]
     fn ffi_creation_failures_clear_output_handles() {
         let invalid_capabilities = MiuDeviceCapabilities {
             abi_version: ABI_VERSION,
@@ -655,6 +828,20 @@ mod tests {
     }
 
     #[test]
+    fn ffi_rejects_noncanonical_or_unbounded_capability_reports() {
+        let oversized = [1_u8; MAX_BACKEND_REPORT + 1];
+        let capabilities = MiuDeviceCapabilities {
+            abi_version: ABI_VERSION, platform: 5, reserved: [1, 0, 0],
+            backends: oversized.as_ptr(), backend_count: oversized.len(),
+        };
+        let request = request(1, 0);
+        let mut renderer = ptr::null_mut();
+        // SAFETY: all local FFI inputs are live; validation rejects before reading the list.
+        assert_eq!(unsafe { miu_renderer_create(&capabilities, &request, &mut renderer) }, STATUS_INVALID_ARGUMENT);
+        assert!(renderer.is_null());
+    }
+
+    #[test]
     fn ffi_cpu_canvas_draws_and_exports_premultiplied_pixels() {
         let texture_bytes = [255, 0, 0, 255];
         let mut texture = ptr::null_mut();
@@ -680,7 +867,7 @@ mod tests {
             zoom: 1.0,
             rotation_radians: 0.0,
         };
-        let sprite = MiuCpuSprite {
+        let sprite = MiuCpuSpriteV2 {
             transform: MiuTransform2D {
                 translation: MiuVec2 { x: 0.5, y: 0.5 },
                 rotation_radians: 0.0,
@@ -695,7 +882,7 @@ mod tests {
         };
         // SAFETY: all structures and handles remain live for the draw call.
         assert_eq!(
-            unsafe { miu_cpu_canvas_draw_sprite(canvas, &camera, &sprite, texture) },
+            unsafe { miu_cpu_canvas_draw_sprite_v2(canvas, &camera, &sprite, texture) },
             STATUS_OK
         );
         let mut output = [0_u8; 4];
@@ -713,15 +900,67 @@ mod tests {
     }
 
     #[test]
+    fn ffi_preserves_v1_layouts_and_converts_straight_alpha_explicitly() {
+        assert_eq!(miu_abi_version(), ABI_VERSION);
+        assert_eq!(miu_abi_min_supported_version(), ABI_MIN_SUPPORTED_VERSION);
+        let straight = [255, 0, 0, 128];
+        let mut texture = ptr::null_mut();
+        // SAFETY: local inputs satisfy the ABI contract.
+        assert_eq!(unsafe {
+            miu_cpu_texture_create_straight_rgba8(1, 1, straight.as_ptr(), straight.len(), &mut texture)
+        }, STATUS_OK);
+        let mut canvas = ptr::null_mut();
+        // SAFETY: local output storage is writable.
+        assert_eq!(unsafe { miu_cpu_canvas_create(1, 1, &mut canvas) }, STATUS_OK);
+        let camera = MiuCamera2D {
+            position: MiuVec2 { x: 0.5, y: 0.5 }, viewport: MiuVec2 { x: 1.0, y: 1.0 },
+            zoom: 1.0, rotation_radians: 0.0,
+        };
+        let v1_sprite = MiuCpuSprite {
+            transform: MiuTransform2D { translation: MiuVec2 { x: 0.5, y: 0.5 }, rotation_radians: 0.0, scale: MiuVec2 { x: 1.0, y: 1.0 } },
+            uv: MiuUvRect { left: 0.0, top: 0.0, right: 1.0, bottom: 1.0 },
+            color: MiuColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, layer: 0,
+        };
+        // SAFETY: all local structures and handles live for the call.
+        assert_eq!(unsafe { miu_cpu_canvas_draw_sprite(canvas, &camera, &v1_sprite, texture) }, STATUS_OK);
+        let mut output = [0_u8; 4];
+        // SAFETY: output has exactly the required storage.
+        assert_eq!(unsafe { miu_cpu_canvas_copy_rgba8(canvas, output.as_mut_ptr(), output.len()) }, STATUS_OK);
+        assert_eq!(output, [128, 0, 0, 128]);
+        // SAFETY: rejects a non-premultiplied clear without dereferencing invalid data.
+        assert_eq!(unsafe { miu_cpu_canvas_clear(canvas, MiuRgba8 { r: 255, g: 0, b: 0, a: 0 }) }, STATUS_INVALID_ARGUMENT);
+        // SAFETY: each handle is released exactly once.
+        unsafe { miu_cpu_canvas_release(canvas); miu_cpu_texture_release(texture); }
+    }
+
+    #[test]
+    fn v1_policy_create_and_plan_getter_remain_binary_layout_compatible() {
+        let mut capabilities = caps(&[10]);
+        capabilities.abi_version = 1;
+        let mut legacy_request = request(2, 0);
+        legacy_request.abi_version = 1;
+        let mut renderer = ptr::null_mut();
+        // SAFETY: v1 field layouts are preserved and local structures are valid.
+        assert_eq!(unsafe { miu_renderer_create(&capabilities, &legacy_request, &mut renderer) }, STATUS_OK);
+        let mut plan = MiuRenderPlan::default();
+        // SAFETY: the v1 output layout exactly matches the unsuffixed getter.
+        assert_eq!(unsafe { miu_renderer_get_plan(renderer, &mut plan) }, STATUS_OK);
+        assert_eq!(plan.backend, 10);
+        assert_eq!(plan.tier, 2);
+        // SAFETY: renderer is released exactly once.
+        unsafe { miu_renderer_release(renderer) };
+    }
+
+    #[test]
     fn ffi_returns_an_emergency_plan_when_explicitly_allowed() {
         let capabilities = caps(&[14]);
         let request = request(1, 1);
         let mut renderer = ptr::null_mut();
         // SAFETY: local structures satisfy the FFI contract.
         assert_eq!(unsafe { miu_renderer_create(&capabilities, &request, &mut renderer) }, STATUS_OK);
-        let mut plan = MiuRenderPlan { backend: 0, profile_backend: 0, tier: 0, emergency_fallback: 0, below_minimum: 0 };
+        let mut plan = MiuRenderPlanV2 { backend: 0, profile_backend: 0, tier: 0, emergency_fallback: 0, below_minimum: 0 };
         // SAFETY: renderer is a valid live local handle and plan has storage.
-        assert_eq!(unsafe { miu_renderer_get_plan(renderer, &mut plan) }, STATUS_OK);
+        assert_eq!(unsafe { miu_renderer_get_plan_v2(renderer, &mut plan) }, STATUS_OK);
         assert_eq!(plan.backend, 14);
         assert_eq!(plan.emergency_fallback, 1);
         // SAFETY: renderer is released exactly once.

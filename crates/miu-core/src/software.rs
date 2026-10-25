@@ -49,6 +49,17 @@ impl Rgba8 {
         self.r <= self.a && self.g <= self.a && self.b <= self.a
     }
 
+    /// Converts one straight-alpha RGBA8 input pixel to Miu's premultiplied form.
+    /// RGB is multiplied by alpha with nearest-integer rounding.
+    pub const fn from_straight_alpha(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self {
+            r: ((r as u16 * a as u16 + 127) / 255) as u8,
+            g: ((g as u16 * a as u16 + 127) / 255) as u8,
+            b: ((b as u16 * a as u16 + 127) / 255) as u8,
+            a,
+        }
+    }
+
     fn modulate(self, tint: Color) -> Self {
         fn channel(channel: u8, multiplier: f32) -> u8 {
             let multiplier = if multiplier.is_finite() {
@@ -122,6 +133,30 @@ impl Texture {
         })
     }
 
+    /// Converts row-major straight-alpha RGBA8 pixels to Miu's premultiplied storage.
+    ///
+    /// This explicit conversion is the only straight-alpha input path; [`Self::new`]
+    /// rejects non-premultiplied pixels so blending is never ambiguous.
+    pub fn from_straight_alpha(
+        width: u32,
+        height: u32,
+        pixels: Vec<Rgba8>,
+    ) -> Result<Self, TextureError> {
+        let expected = pixel_len(width, height)?;
+        if pixels.len() != expected {
+            return Err(TextureError::PixelCountMismatch);
+        }
+        let mut pixels = pixels;
+        for pixel in &mut pixels {
+            *pixel = Self::straight_pixel(*pixel);
+        }
+        Self::new(width, height, pixels)
+    }
+
+    const fn straight_pixel(pixel: Rgba8) -> Rgba8 {
+        Rgba8::from_straight_alpha(pixel.r, pixel.g, pixel.b, pixel.a)
+    }
+
     /// Creates a solid-colour texture of `width` by `height` pixels.
     pub fn solid(width: u32, height: u32, color: Rgba8) -> Result<Self, TextureError> {
         let expected = pixel_len(width, height)?;
@@ -157,12 +192,13 @@ impl Texture {
         self.pixels.get(index).copied()
     }
 
-    fn sample_nearest_texel(&self, x: f32, y: f32) -> Rgba8 {
-        // Convert to integral texel coordinates before clamping. This remains
-        // correct for dimensions above f32's exact-integer range and never turns
-        // a right/bottom edge into a transparent sample.
-        let x = x.floor().clamp(0.0, self.width.saturating_sub(1) as f32) as u32;
-        let y = y.floor().clamp(0.0, self.height.saturating_sub(1) as f32) as u32;
+    fn sample_nearest_in_source(&self, x: f32, y: f32, source: SourceRect) -> Rgba8 {
+        // Atlas-safe nearest sampling clamps to the source rectangle, never to the
+        // whole texture. UV values beyond the source are intentionally clamped.
+        let max_x = source.x + source.width - 1;
+        let max_y = source.y + source.height - 1;
+        let x = x.floor().clamp(source.x as f32, max_x as f32) as u32;
+        let y = y.floor().clamp(source.y as f32, max_y as f32) as u32;
         self.pixel(x, y).unwrap_or(Rgba8::TRANSPARENT)
     }
 }
@@ -246,9 +282,16 @@ impl Canvas {
         self.height
     }
 
-    /// Fills every pixel with `color`.
-    pub fn clear(&mut self, color: Rgba8) {
+    /// Fills every pixel with a premultiplied colour.
+    ///
+    /// A rejected colour leaves the canvas unchanged. Use
+    /// [`Rgba8::from_straight_alpha`] before clearing with straight-alpha input.
+    pub fn clear(&mut self, color: Rgba8) -> Result<(), SoftwareRenderError> {
+        if !color.is_premultiplied() {
+            return Err(SoftwareRenderError::InvalidPremultipliedColor);
+        }
         self.pixels.fill(color);
+        Ok(())
     }
 
     /// Returns a canvas pixel, or `None` when the coordinates are outside it.
@@ -331,7 +374,7 @@ impl Canvas {
                         + resolved.source.height as f32
                             * (sprite.uv.top + (sprite.uv.bottom - sprite.uv.top) * v);
                     let foreground = texture
-                        .sample_nearest_texel(texel_x, texel_y)
+                        .sample_nearest_in_source(texel_x, texel_y, resolved.source)
                         .modulate(sprite.color);
                     self.blend_pixel(x, y, foreground);
                 }
@@ -383,6 +426,8 @@ pub enum SoftwareRenderError {
     InvalidSpriteTransform,
     /// A pixel source rectangle exceeded the bound texture.
     InvalidSourceRect,
+    /// A clear colour was not in premultiplied-alpha form.
+    InvalidPremultipliedColor,
     /// The frame referenced a texture identifier absent from the texture store.
     MissingTexture(u64),
 }
@@ -401,6 +446,9 @@ impl ResolvedSprite {
     fn new(sprite: &Sprite, texture: &Texture) -> Result<Self, SoftwareRenderError> {
         validate_sprite(sprite)?;
         let source = if sprite.source.width == 0 && sprite.source.height == 0 {
+            if sprite.source.x != 0 || sprite.source.y != 0 {
+                return Err(SoftwareRenderError::InvalidSourceRect);
+            }
             SourceRect { x: 0, y: 0, width: texture.width(), height: texture.height() }
         } else {
             sprite.source
@@ -471,10 +519,10 @@ impl SpriteInverse {
         let (sprite_sin, sprite_cos) = sprite.transform.rotation_radians.sin_cos();
         let screen_to_world = |delta: Vec2| -> Vec2 {
             let scaled = delta * (1.0 / camera.zoom);
-            // Invert the camera's precomputed R(-rotation) matrix.
+            // Transpose the precomputed R(-rotation) matrix to obtain R(+rotation).
             Vec2::new(
-                scaled.x * camera.cos - scaled.y * camera.sin,
-                scaled.x * camera.sin + scaled.y * camera.cos,
+                scaled.x * camera.cos + scaled.y * camera.sin,
+                -scaled.x * camera.sin + scaled.y * camera.cos,
             )
         };
         let to_local = |world_delta: Vec2| -> Vec2 {
@@ -617,7 +665,7 @@ mod tests {
             g: 0,
             b: 255,
             a: 255,
-        });
+        }).unwrap();
         let mut test_camera = Camera2D::new(Vec2::new(1.0, 1.0)).unwrap();
         test_camera.position = Vec2::new(0.5, 0.5);
         let mut test_sprite = sprite(1);
@@ -722,6 +770,73 @@ mod tests {
     }
 
     #[test]
+    fn rotated_camera_rasterization_matches_public_camera_inverse_golden_pixels() {
+        let texture = Texture::new(
+            3,
+            1,
+            vec![
+                Rgba8 { r: 255, g: 0, b: 0, a: 255 },
+                Rgba8 { r: 0, g: 255, b: 0, a: 255 },
+                Rgba8 { r: 0, g: 0, b: 255, a: 255 },
+            ],
+        )
+        .unwrap();
+        // Right-angle and non-right-angle cameras are all checked against the
+        // public inverse. A non-symmetric atlas makes transpose/sign regressions
+        // observable rather than hiding them behind a solid texture.
+        for rotation in [
+            core::f32::consts::FRAC_PI_2,
+            core::f32::consts::PI,
+            0.37_f32,
+        ] {
+            let mut rotated_camera = Camera2D::new(Vec2::new(32.0, 32.0)).unwrap();
+            rotated_camera.zoom = 8.0;
+            rotated_camera.rotation_radians = rotation;
+            let mut subject = sprite(1);
+            subject.size = Vec2::new(3.0, 1.0);
+            let mut canvas = Canvas::new(32, 32).unwrap();
+            canvas.draw_sprite(&rotated_camera, &subject, &texture).unwrap();
+
+            for (world, expected_texel, expected) in [
+                (Vec2::new(-1.0, 0.0), 0, Rgba8 { r: 255, g: 0, b: 0, a: 255 }),
+                (Vec2::new(0.0, 0.0), 1, Rgba8 { r: 0, g: 255, b: 0, a: 255 }),
+                (Vec2::new(1.0, 0.0), 2, Rgba8 { r: 0, g: 0, b: 255, a: 255 }),
+            ] {
+                let screen = rotated_camera.world_to_screen(world).unwrap();
+                let x = screen.x.floor() as u32;
+                let y = screen.y.floor() as u32;
+                let raster_centre = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                let recovered = rotated_camera.screen_to_world(raster_centre).unwrap();
+                // The raster pixel centre must map back into this source texel.
+                let source_texel = (recovered.x + 1.5).floor() as i32;
+                assert_eq!(source_texel, expected_texel, "public inverse at rotation {rotation}");
+                assert_eq!(canvas.pixel(x, y), Some(expected), "raster at rotation {rotation}");
+            }
+        }
+    }
+
+    #[test]
+    fn atlas_sampling_never_reads_an_adjacent_source_region() {
+        let texture = Texture::new(
+            3,
+            1,
+            vec![
+                Rgba8 { r: 255, g: 0, b: 0, a: 255 },
+                Rgba8 { r: 0, g: 255, b: 0, a: 255 },
+                Rgba8 { r: 0, g: 0, b: 255, a: 255 },
+            ],
+        )
+        .unwrap();
+        let mut subject = sprite(1);
+        subject.source = SourceRect { x: 0, y: 0, width: 2, height: 1 };
+        subject.size = Vec2::new(2.0, 1.0);
+        subject.uv = crate::UvRect { left: 0.0, top: 0.0, right: 2.0, bottom: 1.0 };
+        let mut canvas = Canvas::new(4, 4).unwrap();
+        canvas.draw_sprite(&camera(), &subject, &texture).unwrap();
+        assert_ne!(canvas.pixel(2, 1).unwrap().b, 255);
+    }
+
+    #[test]
     fn invalid_frame_does_not_partially_modify_canvas() {
         let mut textures = TextureStore::new();
         textures.insert(1, Texture::solid(1, 1, Rgba8::WHITE).unwrap());
@@ -729,13 +844,36 @@ mod tests {
         builder.push(sprite(1));
         builder.push(sprite(404));
         let mut canvas = Canvas::new(4, 4).unwrap();
-        canvas.clear(Rgba8 { r: 0, g: 0, b: 255, a: 255 });
+        canvas.clear(Rgba8 { r: 0, g: 0, b: 255, a: 255 }).unwrap();
         let before = canvas.pixels().to_vec();
         assert_eq!(
             canvas.draw_frame(&camera(), &builder.finish(), &textures),
             Err(SoftwareRenderError::MissingTexture(404))
         );
         assert_eq!(canvas.pixels(), before.as_slice());
+    }
+
+    #[test]
+    fn full_source_sentinel_requires_zero_origin() {
+        let texture = Texture::solid(1, 1, Rgba8::WHITE).unwrap();
+        let mut invalid = sprite(1);
+        invalid.source = SourceRect { x: 1, y: 0, width: 0, height: 0 };
+        let error = Canvas::new(4, 4).unwrap().draw_sprite(&camera(), &invalid, &texture);
+        assert_eq!(error, Err(SoftwareRenderError::InvalidSourceRect));
+    }
+
+    #[test]
+    fn straight_alpha_conversion_and_clear_contract_are_explicit() {
+        let converted = Rgba8::from_straight_alpha(255, 127, 0, 128);
+        assert_eq!(converted, Rgba8 { r: 128, g: 64, b: 0, a: 128 });
+        let texture = Texture::from_straight_alpha(1, 1, vec![Rgba8 { r: 255, g: 0, b: 0, a: 128 }]).unwrap();
+        assert_eq!(texture.pixel(0, 0), Some(Rgba8 { r: 128, g: 0, b: 0, a: 128 }));
+        let mut canvas = Canvas::new(1, 1).unwrap();
+        assert_eq!(
+            canvas.clear(Rgba8 { r: 255, g: 0, b: 0, a: 0 }),
+            Err(SoftwareRenderError::InvalidPremultipliedColor)
+        );
+        assert_eq!(canvas.pixel(0, 0), Some(Rgba8::TRANSPARENT));
     }
 
     #[test]
