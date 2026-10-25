@@ -56,6 +56,7 @@ namespace Miu
     public struct RendererRequest
     {
         public RenderTier MinimumTier;
+        /// <summary>Preferred compliant tier; stronger tiers are tried only when this cannot run.</summary>
         public RenderTier PreferredTier;
 
         /// <summary>
@@ -123,6 +124,11 @@ namespace Miu
                 status = Status.InvalidArgument;
                 return null;
             }
+            if (!Native.HasV2Abi())
+            {
+                status = Status.Unsupported;
+                return null;
+            }
 
             IntPtr backendMemory = IntPtr.Zero;
             try
@@ -170,6 +176,10 @@ namespace Miu
             if (handle == IntPtr.Zero)
             {
                 return Status.InvalidArgument;
+            }
+            if (!Native.HasV2Abi())
+            {
+                return Status.Unsupported;
             }
             NativePlan nativePlan;
             var status = Native.RendererGetPlan(handle, out nativePlan);
@@ -237,13 +247,35 @@ namespace Miu
             internal const uint AbiVersion = 2;
             private const string Library = "miu_ffi";
 
+            internal static bool HasV2Abi()
+            {
+                try
+                {
+                    return Marshal.SizeOf(typeof(NativePlan)) == 5
+                        && Marshal.OffsetOf(typeof(NativePlan), "ProfileBackend").ToInt32() == 1
+                        && Marshal.OffsetOf(typeof(NativePlan), "BelowMinimum").ToInt32() == 4
+                        && AbiMinSupportedVersion() <= AbiVersion
+                        && AbiVersionQuery() >= AbiVersion;
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    return false;
+                }
+            }
+
+            [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_abi_version")]
+            private static extern uint AbiVersionQuery();
+
+            [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_abi_min_supported_version")]
+            private static extern uint AbiMinSupportedVersion();
+
             [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_renderer_create")]
             internal static extern Status RendererCreate(
                 ref NativeCapabilities capabilities,
                 ref NativeRequest request,
                 out IntPtr renderer);
 
-            [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_renderer_get_plan")]
+            [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_renderer_get_plan_v2")]
             internal static extern Status RendererGetPlan(IntPtr renderer, out NativePlan plan);
 
             [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_renderer_release")]

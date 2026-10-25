@@ -139,7 +139,30 @@ namespace Miu
                 return null;
             }
             IntPtr nativeTexture;
+            if (!CpuNative.HasV2Abi())
+            {
+                status = Status.Unsupported;
+                return null;
+            }
             status = CpuNative.TextureCreate(width, height, rgbaBytes, new UIntPtr((uint)rgbaBytes.Length), out nativeTexture);
+            return status == Status.Ok ? new CpuTexture(nativeTexture) : null;
+        }
+
+        /// <summary>Creates a texture from exactly <c>width * height * 4</c> straight-alpha RGBA8 bytes.</summary>
+        public static CpuTexture CreateStraightAlpha(uint width, uint height, byte[] rgbaBytes, out Status status)
+        {
+            if (rgbaBytes == null)
+            {
+                status = Status.InvalidArgument;
+                return null;
+            }
+            if (!CpuNative.HasV2Abi())
+            {
+                status = Status.Unsupported;
+                return null;
+            }
+            IntPtr nativeTexture;
+            status = CpuNative.TextureCreateStraightAlpha(width, height, rgbaBytes, new UIntPtr((uint)rgbaBytes.Length), out nativeTexture);
             return status == Status.Ok ? new CpuTexture(nativeTexture) : null;
         }
 
@@ -192,6 +215,11 @@ namespace Miu
 
         public static CpuCanvas Create(uint width, uint height, out Status status)
         {
+            if (!CpuNative.HasV2Abi())
+            {
+                status = Status.Unsupported;
+                return null;
+            }
             IntPtr nativeCanvas;
             status = CpuNative.CanvasCreate(width, height, out nativeCanvas);
             return status == Status.Ok ? new CpuCanvas(nativeCanvas, width, height) : null;
@@ -207,6 +235,10 @@ namespace Miu
             if (handle == IntPtr.Zero || texture == null || !texture.IsValid)
             {
                 return Status.InvalidArgument;
+            }
+            if (!CpuNative.HasV2Abi())
+            {
+                return Status.Unsupported;
             }
             return CpuNative.CanvasDraw(handle, ref camera, ref sprite, texture.Handle);
         }
@@ -263,9 +295,44 @@ namespace Miu
     internal static class CpuNative
     {
         private const string Library = "miu_ffi";
+        private const uint AbiVersion = 2;
+
+        internal static bool HasV2Abi()
+        {
+            try
+            {
+                return Marshal.SizeOf(typeof(CpuSprite)) == 88
+                    && Marshal.OffsetOf(typeof(CpuSprite), "Source").ToInt32() == 20
+                    && Marshal.OffsetOf(typeof(CpuSprite), "Uv").ToInt32() == 36
+                    && Marshal.OffsetOf(typeof(CpuSprite), "Size").ToInt32() == 52
+                    && Marshal.OffsetOf(typeof(CpuSprite), "Pivot").ToInt32() == 60
+                    && Marshal.OffsetOf(typeof(CpuSprite), "Color").ToInt32() == 68
+                    && Marshal.OffsetOf(typeof(CpuSprite), "Layer").ToInt32() == 84
+                    && AbiMinSupportedVersion() <= AbiVersion
+                    && AbiVersionQuery() >= AbiVersion;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return false;
+            }
+        }
+
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_abi_version")]
+        private static extern uint AbiVersionQuery();
+
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_abi_min_supported_version")]
+        private static extern uint AbiMinSupportedVersion();
 
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_cpu_texture_create_rgba8")]
         internal static extern Status TextureCreate(
+            uint width,
+            uint height,
+            [In] byte[] rgbaBytes,
+            UIntPtr rgbaByteCount,
+            out IntPtr texture);
+
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_cpu_texture_create_straight_rgba8")]
+        internal static extern Status TextureCreateStraightAlpha(
             uint width,
             uint height,
             [In] byte[] rgbaBytes,
@@ -284,7 +351,7 @@ namespace Miu
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_cpu_canvas_clear")]
         internal static extern Status CanvasClear(IntPtr canvas, CpuPixel color);
 
-        [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_cpu_canvas_draw_sprite")]
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_cpu_canvas_draw_sprite_v2")]
         internal static extern Status CanvasDraw(
             IntPtr canvas,
             ref CpuCamera2D camera,

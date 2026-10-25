@@ -11,6 +11,27 @@
 
 namespace miu {
 
+// Compile-time guards complement the runtime ABI handshake below. Any change to
+// these layouts must introduce another versioned descriptor/function pair.
+static_assert(sizeof(miu_render_plan) == 4U, "miu_render_plan ABI v1 changed");
+static_assert(sizeof(miu_render_plan_v2) == 5U, "miu_render_plan_v2 ABI changed");
+static_assert(sizeof(miu_cpu_sprite) == 56U, "miu_cpu_sprite ABI v1 changed");
+static_assert(sizeof(miu_cpu_sprite_v2) == 88U, "miu_cpu_sprite_v2 ABI changed");
+static_assert(offsetof(miu_cpu_sprite, uv) == 20U, "miu_cpu_sprite ABI v1 UV offset changed");
+static_assert(offsetof(miu_cpu_sprite, color) == 36U, "miu_cpu_sprite ABI v1 colour offset changed");
+static_assert(offsetof(miu_cpu_sprite_v2, source) == 20U, "miu_cpu_sprite_v2 source offset changed");
+static_assert(offsetof(miu_cpu_sprite_v2, uv) == 36U, "miu_cpu_sprite_v2 UV offset changed");
+static_assert(offsetof(miu_cpu_sprite_v2, size) == 52U, "miu_cpu_sprite_v2 size offset changed");
+static_assert(offsetof(miu_cpu_sprite_v2, pivot) == 60U, "miu_cpu_sprite_v2 pivot offset changed");
+static_assert(offsetof(miu_cpu_sprite_v2, color) == 68U, "miu_cpu_sprite_v2 colour offset changed");
+static_assert(offsetof(miu_cpu_sprite_v2, layer) == 84U, "miu_cpu_sprite_v2 layer offset changed");
+
+/** Returns true only when the loaded library exports the complete v2 contract. */
+inline bool abi_v2_available() noexcept {
+    return miu_abi_min_supported_version() <= MIU_ABI_VERSION
+        && miu_abi_version() >= MIU_ABI_VERSION;
+}
+
 using Platform = miu_platform_t;
 using Backend = miu_backend_t;
 using RenderTier = miu_render_tier_t;
@@ -52,7 +73,7 @@ private:
     std::vector<Backend> backends_;
 };
 
-/** Project-level selection policy. Best effort is opt-in and must be warned about. */
+/** Project-level policy: try `preferred_tier` before escalating above it. Best effort is opt-in. */
 struct RendererRequest final {
     RenderTier minimum_tier = MIU_RENDER_TIER_COMPATIBILITY;
     RenderTier preferred_tier = MIU_RENDER_TIER_COMPATIBILITY;
@@ -109,6 +130,12 @@ public:
         const CapabilityReport& capabilities,
         const RendererRequest& request,
         Status* out_status = nullptr) noexcept {
+        if (!abi_v2_available()) {
+            if (out_status != nullptr) {
+                *out_status = Status::Unsupported;
+            }
+            return Renderer();
+        }
         const miu_device_capabilities c_capabilities = capabilities.c_value();
         const miu_renderer_request c_request = request.c_value();
         miu_renderer* handle = nullptr;
@@ -126,8 +153,11 @@ public:
         if (handle_ == nullptr || out_plan == nullptr) {
             return Status::InvalidArgument;
         }
-        miu_render_plan raw_plan{};
-        const auto raw_status = miu_renderer_get_plan(handle_, &raw_plan);
+        if (!abi_v2_available()) {
+            return Status::Unsupported;
+        }
+        miu_render_plan_v2 raw_plan{};
+        const auto raw_status = miu_renderer_get_plan_v2(handle_, &raw_plan);
         if (raw_status == MIU_STATUS_OK) {
             out_plan->backend = raw_plan.backend;
             out_plan->profile_backend = raw_plan.profile_backend;
@@ -150,7 +180,7 @@ private:
 /** Direct C++ aliases for CPU rasterizer descriptors in the stable C ABI. */
 using CpuPixel = miu_rgba8;
 using CpuCamera = miu_camera2d;
-using CpuSprite = miu_cpu_sprite;
+using CpuSprite = miu_cpu_sprite_v2;
 
 /** Move-only CPU texture used by the deterministic reference renderer. */
 class CpuTexture final {
@@ -177,8 +207,39 @@ public:
         std::uint32_t height,
         const std::vector<std::uint8_t>& rgba_bytes,
         Status* out_status = nullptr) noexcept {
+        if (!abi_v2_available()) {
+            if (out_status != nullptr) {
+                *out_status = Status::Unsupported;
+            }
+            return CpuTexture();
+        }
         miu_cpu_texture* handle = nullptr;
         const auto raw_status = miu_cpu_texture_create_rgba8(
+            width,
+            height,
+            rgba_bytes.empty() ? nullptr : rgba_bytes.data(),
+            rgba_bytes.size(),
+            &handle);
+        if (out_status != nullptr) {
+            *out_status = static_cast<Status>(raw_status);
+        }
+        return CpuTexture(raw_status == MIU_STATUS_OK ? handle : nullptr);
+    }
+
+    /** Creates a texture from tightly packed straight-alpha RGBA8 pixels. */
+    [[nodiscard]] static CpuTexture create_straight_alpha(
+        std::uint32_t width,
+        std::uint32_t height,
+        const std::vector<std::uint8_t>& rgba_bytes,
+        Status* out_status = nullptr) noexcept {
+        if (!abi_v2_available()) {
+            if (out_status != nullptr) {
+                *out_status = Status::Unsupported;
+            }
+            return CpuTexture();
+        }
+        miu_cpu_texture* handle = nullptr;
+        const auto raw_status = miu_cpu_texture_create_straight_rgba8(
             width,
             height,
             rgba_bytes.empty() ? nullptr : rgba_bytes.data(),
@@ -231,6 +292,12 @@ public:
         std::uint32_t width,
         std::uint32_t height,
         Status* out_status = nullptr) noexcept {
+        if (!abi_v2_available()) {
+            if (out_status != nullptr) {
+                *out_status = Status::Unsupported;
+            }
+            return CpuCanvas();
+        }
         miu_cpu_canvas* handle = nullptr;
         const auto raw_status = miu_cpu_canvas_create(width, height, &handle);
         if (out_status != nullptr) {
@@ -260,8 +327,11 @@ public:
         if (handle_ == nullptr || !texture.valid()) {
             return Status::InvalidArgument;
         }
+        if (!abi_v2_available()) {
+            return Status::Unsupported;
+        }
         return static_cast<Status>(
-            miu_cpu_canvas_draw_sprite(handle_, &camera, &sprite, texture.handle_));
+            miu_cpu_canvas_draw_sprite_v2(handle_, &camera, &sprite, texture.handle_));
     }
 
     /**

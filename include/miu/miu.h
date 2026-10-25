@@ -28,8 +28,10 @@
 extern "C" {
 #endif
 
-/** Increment only for an incompatible ABI change. */
+/** Current ABI revision requested by newly compiled bindings. */
 #define MIU_ABI_VERSION UINT32_C(2)
+/** Oldest ABI revision whose legacy entry points remain available. */
+#define MIU_ABI_MIN_SUPPORTED_VERSION UINT32_C(1)
 
 /** Values accepted by miu_device_capabilities::platform. */
 typedef uint8_t miu_platform_t;
@@ -96,8 +98,9 @@ typedef struct miu_device_capabilities {
 
 /** Project renderer policy.
  *
- * Set `allow_best_effort` only after warning the end user that their device does
- * not meet the declared minimum and rendering may fail or be degraded.
+ * `preferred_tier` is attempted before stronger tiers; it must not be below
+ * `minimum_tier`. Set `allow_best_effort` only after warning the end user that
+ * their device does not meet the declared minimum and rendering may fail or be degraded.
  */
 typedef struct miu_renderer_request {
     uint32_t abi_version;
@@ -107,25 +110,35 @@ typedef struct miu_renderer_request {
     uint8_t reserved;
 } miu_renderer_request;
 
-/** Immutable selection result held by a renderer handle.
- *
- * `backend` is the actual API reported by the device; `profile_backend` is the
- * minimum catalog API profile it satisfies. They differ when, for example, a
- * Vulkan 1.4 adapter satisfies a Vulkan 1.3 profile.
+/**
+ * ABI v1 selection result. This layout and `miu_renderer_get_plan` are retained
+ * for binaries compiled against v1. New code must use `miu_render_plan_v2` and
+ * `miu_renderer_get_plan_v2`; do not reinterpret one as the other.
  */
 typedef struct miu_render_plan {
     miu_backend_t backend;
-    miu_backend_t profile_backend;
     miu_render_tier_t tier;
     uint8_t emergency_fallback;
     uint8_t below_minimum;
 } miu_render_plan;
 
+/** ABI v2 selection result with both the actual and catalog profile API. */
+typedef struct miu_render_plan_v2 {
+    miu_backend_t backend;
+    miu_backend_t profile_backend;
+    miu_render_tier_t tier;
+    uint8_t emergency_fallback;
+    uint8_t below_minimum;
+} miu_render_plan_v2;
+
 /** Opaque policy renderer handle. */
 typedef struct miu_renderer miu_renderer;
 
-/** Returns the ABI version compiled into the linked library. */
+/** Returns the newest ABI revision compiled into the linked library. */
 MIU_API uint32_t miu_abi_version(void);
+
+/** Returns the oldest ABI revision whose legacy entry points are supported. */
+MIU_API uint32_t miu_abi_min_supported_version(void);
 
 /**
  * Selects an API profile and creates an opaque renderer-policy handle.
@@ -139,10 +152,15 @@ MIU_API miu_status_t miu_renderer_create(
     const miu_renderer_request* request,
     miu_renderer** out_renderer);
 
-/** Copies the immutable selected plan from a renderer handle. */
+/** Copies an ABI v1 projection of a selected plan for existing v1 binaries. */
 MIU_API miu_status_t miu_renderer_get_plan(
     const miu_renderer* renderer,
     miu_render_plan* out_plan);
+
+/** Copies the complete ABI v2 selected plan. */
+MIU_API miu_status_t miu_renderer_get_plan_v2(
+    const miu_renderer* renderer,
+    miu_render_plan_v2* out_plan);
 
 /** Releases a renderer-policy handle. It is safe to pass NULL. */
 MIU_API void miu_renderer_release(miu_renderer* renderer);
@@ -201,11 +219,22 @@ typedef struct miu_source_rect {
 } miu_source_rect;
 
 /**
- * A textured sprite. Translation identifies the `pivot` in world space. `size`
- * controls geometry independently from `source`; `(0, 0)` preserves the legacy
- * source-size geometry. Reverse UV bounds mirror sampling only.
+ * ABI v1 sprite descriptor retained for old binaries and the unsuffixed draw
+ * function. Its geometry uses the complete texture and centres its pivot.
  */
 typedef struct miu_cpu_sprite {
+    miu_transform2d transform;
+    miu_uv_rect uv;
+    miu_color color;
+    int32_t layer;
+} miu_cpu_sprite;
+
+/**
+ * ABI v2 sprite descriptor. Translation identifies `pivot` in world space.
+ * `source` selects an atlas rectangle; `(0, 0, 0, 0)` alone selects the whole
+ * texture. `size == (0, 0)` uses source dimensions. Reverse UV bounds mirror.
+ */
+typedef struct miu_cpu_sprite_v2 {
     miu_transform2d transform;
     miu_source_rect source;
     miu_uv_rect uv;
@@ -213,7 +242,7 @@ typedef struct miu_cpu_sprite {
     miu_vec2 pivot;
     miu_color color;
     int32_t layer;
-} miu_cpu_sprite;
+} miu_cpu_sprite_v2;
 
 /** Opaque CPU texture. Input texture pixels and canvas pixels are premultiplied RGBA8. */
 typedef struct miu_cpu_texture miu_cpu_texture;
@@ -233,6 +262,19 @@ MIU_API miu_status_t miu_cpu_texture_create_rgba8(
     size_t rgba_byte_count,
     miu_cpu_texture** out_texture);
 
+
+/**
+ * Converts row-major straight-alpha RGBA8 bytes to Miu's premultiplied storage.
+ * The input-size and ownership rules are identical to
+ * `miu_cpu_texture_create_rgba8`.
+ */
+MIU_API miu_status_t miu_cpu_texture_create_straight_rgba8(
+    uint32_t width,
+    uint32_t height,
+    const uint8_t* rgba_bytes,
+    size_t rgba_byte_count,
+    miu_cpu_texture** out_texture);
+
 /** Releases a CPU texture. It is safe to pass NULL. */
 MIU_API void miu_cpu_texture_release(miu_cpu_texture* texture);
 
@@ -245,14 +287,21 @@ MIU_API miu_status_t miu_cpu_canvas_create(
 /** Releases a CPU canvas. It is safe to pass NULL. */
 MIU_API void miu_cpu_canvas_release(miu_cpu_canvas* canvas);
 
-/** Fills a CPU canvas with a premultiplied colour. */
+/** Fills a CPU canvas with a premultiplied colour; invalid straight-alpha values are rejected. */
 MIU_API miu_status_t miu_cpu_canvas_clear(miu_cpu_canvas* canvas, miu_rgba8 color);
 
-/** Draws a sprite with nearest-neighbour sampling and premultiplied source-over blending. */
+/** Draws an ABI v1 sprite with nearest-neighbour source-over blending. */
 MIU_API miu_status_t miu_cpu_canvas_draw_sprite(
     miu_cpu_canvas* canvas,
     const miu_camera2d* camera,
     const miu_cpu_sprite* sprite,
+    const miu_cpu_texture* texture);
+
+/** Draws an ABI v2 sprite with atlas/source-size/pivot support. */
+MIU_API miu_status_t miu_cpu_canvas_draw_sprite_v2(
+    miu_cpu_canvas* canvas,
+    const miu_camera2d* camera,
+    const miu_cpu_sprite_v2* sprite,
     const miu_cpu_texture* texture);
 
 /**
