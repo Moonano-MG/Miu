@@ -128,6 +128,24 @@ impl Backend {
                 | (Self::OpenGL33, Self::OpenGL30)
         )
     }
+
+    /// Version ordering within an API family for selecting the actual device API.
+    const fn version_rank(self) -> u8 {
+        match self {
+            Self::Vulkan11 => 11,
+            Self::Vulkan12 => 12,
+            Self::Vulkan13 => 13,
+            Self::Vulkan14 => 14,
+            Self::Metal1 => 1,
+            Self::Metal2 => 2,
+            Self::Metal3 => 3,
+            Self::OpenGLES20 => 20,
+            Self::OpenGLES30 => 30,
+            Self::OpenGL30 => 30,
+            Self::OpenGL33 => 33,
+            _ => 0,
+        }
+    }
 }
 
 /// Explicit capabilities gathered by a native platform bridge.
@@ -157,12 +175,21 @@ impl DeviceCapabilities {
         self
     }
 
-    /// Reports whether an available implementation satisfies `required`.
-    pub fn supports(&self, required: Backend) -> bool {
+    /// Returns the highest-version available implementation that satisfies `profile`.
+    ///
+    /// The returned value is the API a bridge must actually create. It is distinct
+    /// from the catalog profile that established the minimum feature requirement.
+    pub fn best_backend_for(&self, profile: Backend) -> Option<Backend> {
         self.backends
             .iter()
             .copied()
-            .any(|available| available.satisfies(required))
+            .filter(|available| available.satisfies(profile))
+            .max_by_key(|available| available.version_rank())
+    }
+
+    /// Reports whether an available implementation satisfies `required`.
+    pub fn supports(&self, required: Backend) -> bool {
+        self.best_backend_for(required).is_some()
     }
 }
 
@@ -192,11 +219,17 @@ impl RendererRequest {
         mut self,
         preferred_tier: RenderTier,
     ) -> Result<Self, RequestError> {
-        if preferred_tier < self.minimum_tier {
+        self.preferred_tier = preferred_tier;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Validates a request created through public fields as well as constructors.
+    pub fn validate(&self) -> Result<(), RequestError> {
+        if self.preferred_tier < self.minimum_tier {
             return Err(RequestError::PreferredBelowMinimum);
         }
-        self.preferred_tier = preferred_tier;
-        Ok(self)
+        Ok(())
     }
 }
 
@@ -210,9 +243,11 @@ pub enum RequestError {
 /// A planned graphics API selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderPlan {
-    /// API selected for renderer creation.
+    /// Actual API reported by the device that the bridge must create.
     pub backend: Backend,
-    /// Policy tier represented by `backend`.
+    /// Minimum API profile used to select this plan.
+    pub profile_backend: Backend,
+    /// Policy tier represented by `profile_backend`.
     pub tier: RenderTier,
     /// The selected plan is an emergency fallback rather than a normal profile.
     pub emergency_fallback: bool,
@@ -234,6 +269,8 @@ pub struct SelectionError {
     pub minimum_tier: RenderTier,
     /// Every candidate considered in policy order, useful for user-facing logs.
     pub attempted: Vec<Backend>,
+    /// Whether selection failed because the public request fields were inconsistent.
+    pub invalid_request: Option<RequestError>,
 }
 
 /// Selects a normal, compliant profile for `device`.
@@ -245,6 +282,13 @@ pub fn select_renderer(
     device: &DeviceCapabilities,
     request: &RendererRequest,
 ) -> Result<RenderPlan, SelectionError> {
+    if let Err(error) = request.validate() {
+        return Err(SelectionError {
+            minimum_tier: request.minimum_tier,
+            attempted: Vec::new(),
+            invalid_request: Some(error),
+        });
+    }
     let candidates = normal_candidates(device.platform, request);
     select_from(device, candidates, request.minimum_tier)
 }
@@ -315,8 +359,8 @@ const WINDOWS: [Profile; 3] = [
 const ANDROID: [Profile; 4] = [
     Profile { backend: Backend::OpenGLES30, tier: RenderTier::Compatibility, emergency: false },
     // Android balanced tier prefers 1.3 but explicitly supports 1.2 devices.
-    Profile { backend: Backend::Vulkan13, tier: RenderTier::Balanced, emergency: false },
     Profile { backend: Backend::Vulkan12, tier: RenderTier::Balanced, emergency: false },
+    Profile { backend: Backend::Vulkan13, tier: RenderTier::Balanced, emergency: false },
     Profile { backend: Backend::Vulkan14, tier: RenderTier::Premium, emergency: false },
 ];
 const APPLE: [Profile; 3] = [
@@ -363,15 +407,13 @@ fn emergency_profiles_for(platform: Platform) -> &'static [Profile] {
 
 fn normal_candidates(platform: Platform, request: &RendererRequest) -> Vec<Profile> {
     let mut candidates = Vec::new();
-    let profiles = profiles_for(platform);
-    for profile in profiles {
-        if profile.tier == request.preferred_tier && profile.tier >= request.minimum_tier {
-            candidates.push(*profile);
-        }
-    }
-    for profile in profiles {
+    // A declared minimum is a floor: choose the strongest compliant profile first.
+    // `preferred_tier` remains validated request metadata for hosts that want to
+    // present a user setting, but never causes automatic downgrade below a stronger
+    // available profile.
+    for profile in profiles_for(platform).iter().rev() {
         if profile.tier >= request.minimum_tier
-            && !candidates.iter().any(|candidate| candidate.backend == profile.backend)
+            && !candidates.iter().any(|candidate: &Profile| candidate.backend == profile.backend)
         {
             candidates.push(*profile);
         }
@@ -386,16 +428,21 @@ fn select_from(
 ) -> Result<RenderPlan, SelectionError> {
     let attempted = candidates.iter().map(|profile| profile.backend).collect();
     for profile in candidates {
-        if device.supports(profile.backend) {
+        if let Some(actual_backend) = device.best_backend_for(profile.backend) {
             return Ok(RenderPlan {
-                backend: profile.backend,
+                backend: actual_backend,
+                profile_backend: profile.backend,
                 tier: profile.tier,
                 emergency_fallback: profile.emergency,
                 below_minimum: profile.tier < minimum_tier,
             });
         }
     }
-    Err(SelectionError { minimum_tier, attempted })
+    Err(SelectionError {
+        minimum_tier,
+        attempted,
+        invalid_request: None,
+    })
 }
 
 /// A two-dimensional vector.
@@ -460,6 +507,10 @@ pub struct Camera2D {
 /// Invalid camera inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraError {
+    /// Camera position must be finite.
+    InvalidPosition,
+    /// A world or screen coordinate was non-finite.
+    InvalidCoordinate,
     /// Viewport dimensions must be finite and positive.
     InvalidViewport,
     /// Zoom must be finite and greater than zero.
@@ -483,6 +534,9 @@ impl Camera2D {
 
     /// Verifies that this camera can safely form transforms.
     pub fn validate(&self) -> Result<(), CameraError> {
+        if !self.position.x.is_finite() || !self.position.y.is_finite() {
+            return Err(CameraError::InvalidPosition);
+        }
         if !self.viewport.x.is_finite()
             || !self.viewport.y.is_finite()
             || self.viewport.x <= 0.0
@@ -502,15 +556,29 @@ impl Camera2D {
     /// Maps a world point to logical screen coordinates with a top-left origin.
     pub fn world_to_screen(&self, world: Vec2) -> Result<Vec2, CameraError> {
         self.validate()?;
+        if !world.x.is_finite() || !world.y.is_finite() {
+            return Err(CameraError::InvalidCoordinate);
+        }
         let local = (world - self.position).rotate(-self.rotation_radians) * self.zoom;
-        Ok(local + self.viewport * 0.5)
+        let screen = local + self.viewport * 0.5;
+        if !screen.x.is_finite() || !screen.y.is_finite() {
+            return Err(CameraError::InvalidCoordinate);
+        }
+        Ok(screen)
     }
 
     /// Maps a logical screen point with a top-left origin back to world coordinates.
     pub fn screen_to_world(&self, screen: Vec2) -> Result<Vec2, CameraError> {
         self.validate()?;
+        if !screen.x.is_finite() || !screen.y.is_finite() {
+            return Err(CameraError::InvalidCoordinate);
+        }
         let local = (screen - self.viewport * 0.5) * (1.0 / self.zoom);
-        Ok(local.rotate(self.rotation_radians) + self.position)
+        let world = local.rotate(self.rotation_radians) + self.position;
+        if !world.x.is_finite() || !world.y.is_finite() {
+            return Err(CameraError::InvalidCoordinate);
+        }
+        Ok(world)
     }
 }
 
@@ -555,7 +623,32 @@ impl UvRect {
     pub const FULL: Self = Self { left: 0.0, top: 0.0, right: 1.0, bottom: 1.0 };
 }
 
-/// Premultiplied linear RGBA colour.
+/// Pixel source rectangle inside a texture atlas.
+///
+/// A zero width and height selects the entire texture for backwards-compatible
+/// full-texture sprites. Atlas users should always provide explicit dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct SourceRect {
+    /// Left source texel.
+    pub x: u32,
+    /// Top source texel.
+    pub y: u32,
+    /// Source width in texels, or zero together with `height` for the full texture.
+    pub width: u32,
+    /// Source height in texels, or zero together with `width` for the full texture.
+    pub height: u32,
+}
+
+impl SourceRect {
+    /// Full texture source region resolved against the bound texture at draw time.
+    pub const FULL: Self = Self { x: 0, y: 0, width: 0, height: 0 };
+}
+
+/// Premultiplied RGBA tint in the caller-selected working colour space.
+///
+/// Miu v0.1 does not perform sRGB/linear conversion; a frame must use one
+/// consistent working space across textures and tint values.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct Color {
@@ -581,8 +674,20 @@ pub struct Sprite {
     pub texture: u64,
     /// Transform from sprite-local to world space.
     pub transform: Transform2D,
-    /// Normalised texture region.
+    /// Pixel source rectangle in the texture atlas.
+    pub source: SourceRect,
+    /// Additional normalised sampling transform within [`Self::source`].
+    ///
+    /// Reversing an axis mirrors sampling only; it never changes geometry.
     pub uv: UvRect,
+    /// Destination size in world units before [`Transform2D::scale`] is applied.
+    ///
+    /// A zero vector resolves to the source rectangle's texel size for legacy
+    /// full-texture sprites. New callers should set this explicitly.
+    pub size: Vec2,
+    /// Normalised origin in destination space: `(0, 0)` is top-left and
+    /// `(0.5, 1)` is the bottom-centre pivot commonly used by VN characters.
+    pub pivot: Vec2,
     /// Premultiplied tint.
     pub color: Color,
     /// Painter's layer; lower layers render first.
@@ -655,7 +760,13 @@ impl BatchBuilder {
     /// Appends a sprite. Its relative order is always retained in `Stable` mode.
     pub fn push(&mut self, sprite: Sprite) {
         self.queued.push(QueuedSprite { sprite, sequence: self.next_sequence });
-        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.next_sequence = self.next_sequence.checked_add(1).expect("more than u64::MAX sprites in one frame");
+    }
+
+    /// Clears submitted commands while retaining allocated capacity for the next frame.
+    pub fn begin_frame(&mut self) {
+        self.queued.clear();
+        self.next_sequence = 0;
     }
 
     /// Sorts commands and groups adjacent matching texture/layer pairs.
@@ -705,6 +816,7 @@ mod tests {
         let request = RendererRequest::new(RenderTier::Balanced);
         let plan = select_renderer(&device, &request).expect("D3D12 is a compliant option");
         assert_eq!(plan.backend, Backend::Direct3D12);
+        assert_eq!(plan.profile_backend, Backend::Direct3D12);
         assert_eq!(plan.tier, RenderTier::Premium);
         assert!(!plan.requires_force_run_warning());
     }
@@ -719,6 +831,7 @@ mod tests {
 
         let plan = select_best_effort(&device, &request).expect("explicit force run allows D2D");
         assert_eq!(plan.backend, Backend::Direct2D12);
+        assert_eq!(plan.profile_backend, Backend::Direct2D12);
         assert!(plan.below_minimum);
     }
 
@@ -739,17 +852,42 @@ mod tests {
         let request = RendererRequest::new(RenderTier::Premium);
         let plan = select_best_effort(&device, &request).expect("WebGL 2 can force-run");
         assert_eq!(plan.backend, Backend::WebGL2);
+        assert_eq!(plan.profile_backend, Backend::WebGL2);
         assert_eq!(plan.tier, RenderTier::Balanced);
         assert!(plan.below_minimum);
     }
 
     #[test]
-    fn newer_vulkan_satisfies_lower_profile() {
+    fn actual_backend_preserves_newer_vulkan_version() {
         let device = DeviceCapabilities::for_platform(Platform::Linux)
             .with_backend(Backend::Vulkan14);
         let request = RendererRequest::new(RenderTier::Balanced);
-        let plan = select_renderer(&device, &request).expect("Vulkan 1.4 supports 1.2");
-        assert_eq!(plan.backend, Backend::Vulkan12);
+        let plan = select_renderer(&device, &request).expect("Vulkan 1.4 satisfies premium Vulkan 1.3");
+        assert_eq!(plan.profile_backend, Backend::Vulkan13);
+        assert_eq!(plan.backend, Backend::Vulkan14);
+        assert_eq!(plan.tier, RenderTier::Premium);
+    }
+
+    #[test]
+    fn actual_backend_preserves_newer_metal_version() {
+        let device = DeviceCapabilities::for_platform(Platform::MacOS)
+            .with_backend(Backend::Metal3);
+        let plan = select_renderer(&device, &RendererRequest::new(RenderTier::Compatibility))
+            .expect("Metal 3 is a compliant actual backend");
+        assert_eq!(plan.profile_backend, Backend::Metal3);
+        assert_eq!(plan.backend, Backend::Metal3);
+        assert_eq!(plan.tier, RenderTier::Premium);
+    }
+
+    #[test]
+    fn public_request_fields_are_validated() {
+        let request = RendererRequest {
+            minimum_tier: RenderTier::Premium,
+            preferred_tier: RenderTier::Compatibility,
+        };
+        let error = select_renderer(&DeviceCapabilities::for_platform(Platform::Linux), &request)
+            .expect_err("inconsistent public fields must not select");
+        assert_eq!(error.invalid_request, Some(RequestError::PreferredBelowMinimum));
     }
 
     #[test]
@@ -783,7 +921,10 @@ mod tests {
         Sprite {
             texture,
             transform: Transform2D::default(),
+            source: SourceRect::FULL,
             uv: UvRect::FULL,
+            size: Vec2::ZERO,
+            pivot: Vec2::new(0.5, 0.5),
             color: Color::WHITE,
             layer,
         }

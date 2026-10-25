@@ -8,7 +8,7 @@ use std::fs;
 
 use miu_core::{
     BatchBuilder, BatchMode, Camera2D, Canvas, Color, Rgba8, Sprite, Texture, TextureStore,
-    Transform2D, UvRect, Vec2,
+    SourceRect, Transform2D, UvRect, Vec2,
 };
 
 fn sprite(texture: u64, position: Vec2, scale: Vec2, layer: i32, color: Color) -> Sprite {
@@ -19,7 +19,10 @@ fn sprite(texture: u64, position: Vec2, scale: Vec2, layer: i32, color: Color) -
             rotation_radians: 0.0,
             scale,
         },
+        source: SourceRect::FULL,
         uv: UvRect::FULL,
+        size: Vec2::ZERO,
+        pivot: Vec2::new(0.5, 0.5),
         color,
         layer,
     }

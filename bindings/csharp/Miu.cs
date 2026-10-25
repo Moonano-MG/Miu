@@ -75,7 +75,10 @@ namespace Miu
     /// <summary>Immutable API selection made by the native policy core.</summary>
     public struct RenderPlan
     {
+        /// <summary>The actual API reported by the selected device.</summary>
         public Backend Backend { get; internal set; }
+        /// <summary>The minimum catalog API profile satisfied by <see cref="Backend"/>.</summary>
+        public Backend ProfileBackend { get; internal set; }
         public RenderTier Tier { get; internal set; }
         public bool EmergencyFallback { get; internal set; }
         public bool BelowMinimum { get; internal set; }
@@ -173,6 +176,7 @@ namespace Miu
             if (status == Status.Ok)
             {
                 plan.Backend = (Backend)nativePlan.Backend;
+                plan.ProfileBackend = (Backend)nativePlan.ProfileBackend;
                 plan.Tier = (RenderTier)nativePlan.Tier;
                 plan.EmergencyFallback = nativePlan.EmergencyFallback != 0;
                 plan.BelowMinimum = nativePlan.BelowMinimum != 0;
@@ -222,6 +226,7 @@ namespace Miu
         private struct NativePlan
         {
             internal byte Backend;
+            internal byte ProfileBackend;
             internal byte Tier;
             internal byte EmergencyFallback;
             internal byte BelowMinimum;
@@ -229,7 +234,7 @@ namespace Miu
 
         private static class Native
         {
-            internal const uint AbiVersion = 1;
+            internal const uint AbiVersion = 2;
             private const string Library = "miu_ffi";
 
             [DllImport(Library, CallingConvention = CallingConvention.Cdecl, EntryPoint = "miu_renderer_create")]

@@ -17,7 +17,10 @@ int main() {
     camera.zoom = 1.0F;
     miu::CpuSprite sprite{};
     sprite.transform.scale = {1.0F, 1.0F};
+    sprite.source = {0U, 0U, 1U, 1U};
     sprite.uv = {0.0F, 0.0F, 1.0F, 1.0F};
+    sprite.size = {1.0F, 1.0F};
+    sprite.pivot = {0.5F, 0.5F};
     sprite.color = {1.0F, 1.0F, 1.0F, 1.0F};
 
     if (canvas.draw(camera, sprite, texture) != miu::Status::Ok) {
