@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Camera2D, CameraError, Color, FrameBatches, Sprite, Vec2};
+use crate::{Camera2D, CameraError, Color, FrameBatches, SourceRect, Sprite, Vec2};
 
 /// Premultiplied RGBA colour stored with eight bits per channel.
 ///
@@ -43,6 +43,11 @@ impl Rgba8 {
         b: 255,
         a: 255,
     };
+
+    /// Whether RGB channels obey the premultiplied-alpha invariant.
+    pub const fn is_premultiplied(self) -> bool {
+        self.r <= self.a && self.g <= self.a && self.b <= self.a
+    }
 
     fn modulate(self, tint: Color) -> Self {
         fn channel(channel: u8, multiplier: f32) -> u8 {
@@ -94,6 +99,10 @@ pub enum TextureError {
     DimensionsOverflow,
     /// Pixel count did not equal `width * height`.
     PixelCountMismatch,
+    /// A source pixel was not premultiplied (`rgb` exceeded `alpha`).
+    InvalidPremultipliedPixel,
+    /// The requested pixel storage could not be allocated.
+    OutOfMemory,
 }
 
 impl Texture {
@@ -102,6 +111,9 @@ impl Texture {
         let expected = pixel_len(width, height)?;
         if pixels.len() != expected {
             return Err(TextureError::PixelCountMismatch);
+        }
+        if pixels.iter().any(|pixel| !pixel.is_premultiplied()) {
+            return Err(TextureError::InvalidPremultipliedPixel);
         }
         Ok(Self {
             width,
@@ -113,10 +125,16 @@ impl Texture {
     /// Creates a solid-colour texture of `width` by `height` pixels.
     pub fn solid(width: u32, height: u32, color: Rgba8) -> Result<Self, TextureError> {
         let expected = pixel_len(width, height)?;
+        if !color.is_premultiplied() {
+            return Err(TextureError::InvalidPremultipliedPixel);
+        }
+        let mut pixels = Vec::new();
+        pixels.try_reserve_exact(expected).map_err(|_| TextureError::OutOfMemory)?;
+        pixels.resize(expected, color);
         Ok(Self {
             width,
             height,
-            pixels: vec![color; expected],
+            pixels,
         })
     }
 
@@ -139,13 +157,12 @@ impl Texture {
         self.pixels.get(index).copied()
     }
 
-    fn sample_nearest(&self, u: f32, v: f32) -> Rgba8 {
-        // Clamp rather than wrapping so atlas-edge sampling cannot read another tile.
-        let u = u.clamp(0.0, 1.0 - f32::EPSILON);
-        let v = v.clamp(0.0, 1.0 - f32::EPSILON);
-        let x = (u * self.width as f32).floor() as u32;
-        let y = (v * self.height as f32).floor() as u32;
-        // Coordinates are clamped to valid ranges immediately above.
+    fn sample_nearest_texel(&self, x: f32, y: f32) -> Rgba8 {
+        // Convert to integral texel coordinates before clamping. This remains
+        // correct for dimensions above f32's exact-integer range and never turns
+        // a right/bottom edge into a transparent sample.
+        let x = x.floor().clamp(0.0, self.width.saturating_sub(1) as f32) as u32;
+        let y = y.floor().clamp(0.0, self.height.saturating_sub(1) as f32) as u32;
         self.pixel(x, y).unwrap_or(Rgba8::TRANSPARENT)
     }
 }
@@ -209,10 +226,13 @@ impl Canvas {
     /// Allocates a transparent CPU canvas.
     pub fn new(width: u32, height: u32) -> Result<Self, TextureError> {
         let length = pixel_len(width, height)?;
+        let mut pixels = Vec::new();
+        pixels.try_reserve_exact(length).map_err(|_| TextureError::OutOfMemory)?;
+        pixels.resize(length, Rgba8::TRANSPARENT);
         Ok(Self {
             width,
             height,
-            pixels: vec![Rgba8::TRANSPARENT; length],
+            pixels,
         })
     }
 
@@ -244,10 +264,14 @@ impl Canvas {
         &self.pixels
     }
 
-    /// Draws one sprite using nearest-neighbour sampling and source-over blending.
+    /// Draws one sprite using centre-of-pixel nearest sampling and premultiplied
+    /// source-over blending.
     ///
-    /// Sprite translation is its centre in world coordinates. With a scale of one,
-    /// one texture pixel occupies one world unit. Negative scale mirrors the sprite.
+    /// The `Sprite::source` rectangle selects atlas texels. `Sprite::size` controls
+    /// geometry independently, and `Sprite::pivot` is the point placed at
+    /// `transform.translation`. A zero `size` preserves legacy behaviour by using
+    /// the source rectangle dimensions. Camera and sprite matrices are built once
+    /// per draw; the pixel loop only performs affine increments and blending.
     pub fn draw_sprite(
         &mut self,
         camera: &Camera2D,
@@ -255,55 +279,66 @@ impl Canvas {
         texture: &Texture,
     ) -> Result<(), SoftwareRenderError> {
         camera.validate().map_err(SoftwareRenderError::Camera)?;
-        validate_sprite(sprite)?;
+        let resolved = ResolvedSprite::new(sprite, texture)?;
+        self.draw_resolved_sprite(camera, sprite, texture, resolved);
+        Ok(())
+    }
 
-        let half = Vec2::new(texture.width as f32 * 0.5, texture.height as f32 * 0.5);
+    fn draw_resolved_sprite(
+        &mut self,
+        camera: &Camera2D,
+        sprite: &Sprite,
+        texture: &Texture,
+        resolved: ResolvedSprite,
+    ) {
+        let camera_matrix = CameraMatrix::new(camera);
+        let inverse = SpriteInverse::new(&camera_matrix, sprite);
         let corners = [
-            Vec2::new(-half.x, -half.y),
-            Vec2::new(half.x, -half.y),
-            Vec2::new(-half.x, half.y),
-            Vec2::new(half.x, half.y),
+            Vec2::new(resolved.left, resolved.top),
+            Vec2::new(resolved.right, resolved.top),
+            Vec2::new(resolved.left, resolved.bottom),
+            Vec2::new(resolved.right, resolved.bottom),
         ];
         let mut minimum = Vec2::new(f32::INFINITY, f32::INFINITY);
         let mut maximum = Vec2::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
         for corner in corners {
-            let screen = camera
-                .world_to_screen(transform_local(sprite, corner))
-                .map_err(SoftwareRenderError::Camera)?;
+            let screen = camera_matrix.world_to_screen(transform_local(sprite, corner));
             minimum.x = minimum.x.min(screen.x);
             minimum.y = minimum.y.min(screen.y);
             maximum.x = maximum.x.max(screen.x);
             maximum.y = maximum.y.max(screen.y);
         }
 
-        let min_x = minimum.x.floor().max(0.0) as u32;
-        let min_y = minimum.y.floor().max(0.0) as u32;
-        let max_x = maximum.x.ceil().min(self.width as f32).max(0.0) as u32;
-        let max_y = maximum.y.ceil().min(self.height as f32).max(0.0) as u32;
+        // Pixel coverage is defined by testing the centre `(x + .5, y + .5)`.
+        let min_x = minimum.x.floor().clamp(0.0, self.width as f32) as u32;
+        let min_y = minimum.y.floor().clamp(0.0, self.height as f32) as u32;
+        let max_x = maximum.x.ceil().clamp(0.0, self.width as f32) as u32;
+        let max_y = maximum.y.ceil().clamp(0.0, self.height as f32) as u32;
+        let first = inverse.local_at(Vec2::new(min_x as f32 + 0.5, min_y as f32 + 0.5));
+        let step_x = inverse.local_delta(Vec2::new(1.0, 0.0));
+        let step_y = inverse.local_delta(Vec2::new(0.0, 1.0));
+        let mut row_local = first;
         for y in min_y..max_y {
+            let mut local = row_local;
             for x in min_x..max_x {
-                let screen = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
-                let world = camera
-                    .screen_to_world(screen)
-                    .map_err(SoftwareRenderError::Camera)?;
-                let local = inverse_transform_local(sprite, world);
-                let source = local + half;
-                if source.x < 0.0
-                    || source.y < 0.0
-                    || source.x >= texture.width as f32
-                    || source.y >= texture.height as f32
-                {
-                    continue;
+                let u = (local.x - resolved.left) / resolved.size.x;
+                let v = (local.y - resolved.top) / resolved.size.y;
+                if (0.0..1.0).contains(&u) && (0.0..1.0).contains(&v) {
+                    let texel_x = resolved.source.x as f32
+                        + resolved.source.width as f32
+                            * (sprite.uv.left + (sprite.uv.right - sprite.uv.left) * u);
+                    let texel_y = resolved.source.y as f32
+                        + resolved.source.height as f32
+                            * (sprite.uv.top + (sprite.uv.bottom - sprite.uv.top) * v);
+                    let foreground = texture
+                        .sample_nearest_texel(texel_x, texel_y)
+                        .modulate(sprite.color);
+                    self.blend_pixel(x, y, foreground);
                 }
-                let source_u = source.x / texture.width as f32;
-                let source_v = source.y / texture.height as f32;
-                let u = sprite.uv.left + (sprite.uv.right - sprite.uv.left) * source_u;
-                let v = sprite.uv.top + (sprite.uv.bottom - sprite.uv.top) * source_v;
-                let foreground = texture.sample_nearest(u, v).modulate(sprite.color);
-                self.blend_pixel(x, y, foreground);
+                local = local + step_x;
             }
+            row_local = row_local + step_y;
         }
-        Ok(())
     }
 
     /// Draws the prepared command stream in its sorted sprite order.
@@ -313,11 +348,22 @@ impl Canvas {
         frame: &FrameBatches,
         textures: &TextureStore,
     ) -> Result<(), SoftwareRenderError> {
+        camera.validate().map_err(SoftwareRenderError::Camera)?;
+        // Validate all commands before changing a pixel so callers never receive a
+        // silently half-rendered frame when an asset or transform is invalid.
         for sprite in &frame.sprites {
             let texture = textures
                 .get(sprite.texture)
                 .ok_or(SoftwareRenderError::MissingTexture(sprite.texture))?;
-            self.draw_sprite(camera, sprite, texture)?;
+            ResolvedSprite::new(sprite, texture)?;
+        }
+        for sprite in &frame.sprites {
+            let texture = textures
+                .get(sprite.texture)
+                .expect("texture store was preflighted above");
+            let resolved = ResolvedSprite::new(sprite, texture)
+                .expect("sprite was preflighted above");
+            self.draw_resolved_sprite(camera, sprite, texture, resolved);
         }
         Ok(())
     }
@@ -333,14 +379,138 @@ impl Canvas {
 pub enum SoftwareRenderError {
     /// The camera could not create a valid transform.
     Camera(CameraError),
-    /// A sprite's scale, rotation, or translation was non-finite or singular.
+    /// A sprite transform, colour, UV, size, or pivot was invalid.
     InvalidSpriteTransform,
+    /// A pixel source rectangle exceeded the bound texture.
+    InvalidSourceRect,
     /// The frame referenced a texture identifier absent from the texture store.
     MissingTexture(u64),
 }
 
+#[derive(Clone, Copy)]
+struct ResolvedSprite {
+    source: SourceRect,
+    size: Vec2,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl ResolvedSprite {
+    fn new(sprite: &Sprite, texture: &Texture) -> Result<Self, SoftwareRenderError> {
+        validate_sprite(sprite)?;
+        let source = if sprite.source.width == 0 && sprite.source.height == 0 {
+            SourceRect { x: 0, y: 0, width: texture.width(), height: texture.height() }
+        } else {
+            sprite.source
+        };
+        let source_right = source.x.checked_add(source.width).ok_or(SoftwareRenderError::InvalidSourceRect)?;
+        let source_bottom = source.y.checked_add(source.height).ok_or(SoftwareRenderError::InvalidSourceRect)?;
+        if source.width == 0
+            || source.height == 0
+            || source_right > texture.width()
+            || source_bottom > texture.height()
+        {
+            return Err(SoftwareRenderError::InvalidSourceRect);
+        }
+        let size = if sprite.size == Vec2::ZERO {
+            Vec2::new(source.width as f32, source.height as f32)
+        } else {
+            sprite.size
+        };
+        if !size.x.is_finite() || !size.y.is_finite() || size.x <= 0.0 || size.y <= 0.0 {
+            return Err(SoftwareRenderError::InvalidSpriteTransform);
+        }
+        let left = -sprite.pivot.x * size.x;
+        let top = -sprite.pivot.y * size.y;
+        Ok(Self { source, size, left, top, right: left + size.x, bottom: top + size.y })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CameraMatrix {
+    position: Vec2,
+    centre: Vec2,
+    zoom: f32,
+    cos: f32,
+    sin: f32,
+}
+
+impl CameraMatrix {
+    fn new(camera: &Camera2D) -> Self {
+        let (sin, cos) = (-camera.rotation_radians).sin_cos();
+        Self {
+            position: camera.position,
+            centre: camera.viewport * 0.5,
+            zoom: camera.zoom,
+            cos,
+            sin,
+        }
+    }
+
+    fn world_to_screen(self, world: Vec2) -> Vec2 {
+        let local = world - self.position;
+        Vec2::new(
+            (local.x * self.cos - local.y * self.sin) * self.zoom + self.centre.x,
+            (local.x * self.sin + local.y * self.cos) * self.zoom + self.centre.y,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SpriteInverse {
+    origin_at_camera_centre: Vec2,
+    camera_centre: Vec2,
+    step_x: Vec2,
+    step_y: Vec2,
+}
+
+impl SpriteInverse {
+    fn new(camera: &CameraMatrix, sprite: &Sprite) -> Self {
+        let (sprite_sin, sprite_cos) = sprite.transform.rotation_radians.sin_cos();
+        let screen_to_world = |delta: Vec2| -> Vec2 {
+            let scaled = delta * (1.0 / camera.zoom);
+            // Invert the camera's precomputed R(-rotation) matrix.
+            Vec2::new(
+                scaled.x * camera.cos - scaled.y * camera.sin,
+                scaled.x * camera.sin + scaled.y * camera.cos,
+            )
+        };
+        let to_local = |world_delta: Vec2| -> Vec2 {
+            let unrotated = Vec2::new(
+                world_delta.x * sprite_cos + world_delta.y * sprite_sin,
+                -world_delta.x * sprite_sin + world_delta.y * sprite_cos,
+            );
+            Vec2::new(
+                unrotated.x / sprite.transform.scale.x,
+                unrotated.y / sprite.transform.scale.y,
+            )
+        };
+        let world_at_centre = camera.position - sprite.transform.translation;
+        Self {
+            origin_at_camera_centre: to_local(world_at_centre),
+            camera_centre: camera.centre,
+            step_x: to_local(screen_to_world(Vec2::new(1.0, 0.0))),
+            step_y: to_local(screen_to_world(Vec2::new(0.0, 1.0))),
+        }
+    }
+
+    fn local_at(self, screen: Vec2) -> Vec2 {
+        let offset = screen - self.camera_centre;
+        self.origin_at_camera_centre + self.step_x * offset.x + self.step_y * offset.y
+    }
+
+    fn local_delta(self, screen_delta: Vec2) -> Vec2 {
+        self.step_x * screen_delta.x + self.step_y * screen_delta.y
+    }
+}
+
 fn validate_sprite(sprite: &Sprite) -> Result<(), SoftwareRenderError> {
     let transform = sprite.transform;
+    let color = sprite.color;
+    let uv = sprite.uv;
+    let pivot = sprite.pivot;
     if !transform.translation.x.is_finite()
         || !transform.translation.y.is_finite()
         || !transform.rotation_radians.is_finite()
@@ -348,6 +518,25 @@ fn validate_sprite(sprite: &Sprite) -> Result<(), SoftwareRenderError> {
         || !transform.scale.y.is_finite()
         || transform.scale.x == 0.0
         || transform.scale.y == 0.0
+        || !color.r.is_finite()
+        || !color.g.is_finite()
+        || !color.b.is_finite()
+        || !color.a.is_finite()
+        || color.r < 0.0
+        || color.g < 0.0
+        || color.b < 0.0
+        || color.a < 0.0
+        || color.r > color.a
+        || color.g > color.a
+        || color.b > color.a
+        || !uv.left.is_finite()
+        || !uv.top.is_finite()
+        || !uv.right.is_finite()
+        || !uv.bottom.is_finite()
+        || !pivot.x.is_finite()
+        || !pivot.y.is_finite()
+        || !(0.0..=1.0).contains(&pivot.x)
+        || !(0.0..=1.0).contains(&pivot.y)
     {
         return Err(SoftwareRenderError::InvalidSpriteTransform);
     }
@@ -360,17 +549,6 @@ fn transform_local(sprite: &Sprite, local: Vec2) -> Vec2 {
         local.y * sprite.transform.scale.y,
     );
     rotate(scaled, sprite.transform.rotation_radians) + sprite.transform.translation
-}
-
-fn inverse_transform_local(sprite: &Sprite, world: Vec2) -> Vec2 {
-    let local = rotate(
-        world - sprite.transform.translation,
-        -sprite.transform.rotation_radians,
-    );
-    Vec2::new(
-        local.x / sprite.transform.scale.x,
-        local.y / sprite.transform.scale.y,
-    )
 }
 
 fn rotate(value: Vec2, radians: f32) -> Vec2 {
@@ -391,7 +569,10 @@ mod tests {
         Sprite {
             texture,
             transform: Transform2D::default(),
+            source: SourceRect::FULL,
             uv: UvRect::FULL,
+            size: Vec2::ZERO,
+            pivot: Vec2::new(0.5, 0.5),
             color: Color::WHITE,
             layer: 0,
         }
@@ -495,6 +676,74 @@ mod tests {
         let mut canvas = Canvas::new(4, 4).unwrap();
         canvas.draw_frame(&camera(), &frame, &textures).unwrap();
         assert_eq!(canvas.pixel(1, 1).unwrap().g, 255);
+    }
+
+    #[test]
+    fn atlas_source_and_destination_size_are_independent() {
+        let texture = Texture::new(
+            4,
+            1,
+            vec![
+                Rgba8 { r: 255, g: 0, b: 0, a: 255 },
+                Rgba8 { r: 0, g: 255, b: 0, a: 255 },
+                Rgba8 { r: 0, g: 0, b: 255, a: 255 },
+                Rgba8 { r: 255, g: 255, b: 255, a: 255 },
+            ],
+        )
+        .unwrap();
+        let mut atlas_sprite = sprite(7);
+        atlas_sprite.source = SourceRect { x: 1, y: 0, width: 2, height: 1 };
+        atlas_sprite.size = Vec2::new(2.0, 1.0);
+        let mut canvas = Canvas::new(4, 4).unwrap();
+        canvas.draw_sprite(&camera(), &atlas_sprite, &texture).unwrap();
+        assert_eq!(canvas.pixel(1, 1).unwrap().g, 255);
+        assert_eq!(canvas.pixel(2, 1).unwrap().b, 255);
+        assert_eq!(canvas.pixel(0, 1), Some(Rgba8::TRANSPARENT));
+    }
+
+    #[test]
+    fn reversed_uv_mirrors_sampling_without_changing_geometry() {
+        let texture = Texture::new(
+            2,
+            1,
+            vec![
+                Rgba8 { r: 255, g: 0, b: 0, a: 255 },
+                Rgba8 { r: 0, g: 255, b: 0, a: 255 },
+            ],
+        )
+        .unwrap();
+        let mut mirrored = sprite(8);
+        mirrored.size = Vec2::new(2.0, 1.0);
+        mirrored.uv = crate::UvRect { left: 1.0, top: 0.0, right: 0.0, bottom: 1.0 };
+        let mut canvas = Canvas::new(4, 4).unwrap();
+        canvas.draw_sprite(&camera(), &mirrored, &texture).unwrap();
+        assert_eq!(canvas.pixel(1, 1).unwrap().g, 255);
+        assert_eq!(canvas.pixel(2, 1).unwrap().r, 255);
+    }
+
+    #[test]
+    fn invalid_frame_does_not_partially_modify_canvas() {
+        let mut textures = TextureStore::new();
+        textures.insert(1, Texture::solid(1, 1, Rgba8::WHITE).unwrap());
+        let mut builder = BatchBuilder::new(BatchMode::Stable);
+        builder.push(sprite(1));
+        builder.push(sprite(404));
+        let mut canvas = Canvas::new(4, 4).unwrap();
+        canvas.clear(Rgba8 { r: 0, g: 0, b: 255, a: 255 });
+        let before = canvas.pixels().to_vec();
+        assert_eq!(
+            canvas.draw_frame(&camera(), &builder.finish(), &textures),
+            Err(SoftwareRenderError::MissingTexture(404))
+        );
+        assert_eq!(canvas.pixels(), before.as_slice());
+    }
+
+    #[test]
+    fn rejects_non_premultiplied_texture_pixels() {
+        assert_eq!(
+            Texture::solid(1, 1, Rgba8 { r: 255, g: 0, b: 0, a: 0 }),
+            Err(TextureError::InvalidPremultipliedPixel)
+        );
     }
 
     #[test]

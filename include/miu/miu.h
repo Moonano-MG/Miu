@@ -29,7 +29,7 @@ extern "C" {
 #endif
 
 /** Increment only for an incompatible ABI change. */
-#define MIU_ABI_VERSION UINT32_C(1)
+#define MIU_ABI_VERSION UINT32_C(2)
 
 /** Values accepted by miu_device_capabilities::platform. */
 typedef uint8_t miu_platform_t;
@@ -107,9 +107,15 @@ typedef struct miu_renderer_request {
     uint8_t reserved;
 } miu_renderer_request;
 
-/** Immutable selection result held by a renderer handle. */
+/** Immutable selection result held by a renderer handle.
+ *
+ * `backend` is the actual API reported by the device; `profile_backend` is the
+ * minimum catalog API profile it satisfies. They differ when, for example, a
+ * Vulkan 1.4 adapter satisfies a Vulkan 1.3 profile.
+ */
 typedef struct miu_render_plan {
     miu_backend_t backend;
+    miu_backend_t profile_backend;
     miu_render_tier_t tier;
     uint8_t emergency_fallback;
     uint8_t below_minimum;
@@ -186,10 +192,25 @@ typedef struct miu_camera2d {
     float rotation_radians;
 } miu_camera2d;
 
-/** A textured sprite. Translation identifies the sprite centre in world space. */
+/** Pixel source rectangle in a texture atlas. A zero width and height select the full texture. */
+typedef struct miu_source_rect {
+    uint32_t x;
+    uint32_t y;
+    uint32_t width;
+    uint32_t height;
+} miu_source_rect;
+
+/**
+ * A textured sprite. Translation identifies the `pivot` in world space. `size`
+ * controls geometry independently from `source`; `(0, 0)` preserves the legacy
+ * source-size geometry. Reverse UV bounds mirror sampling only.
+ */
 typedef struct miu_cpu_sprite {
     miu_transform2d transform;
+    miu_source_rect source;
     miu_uv_rect uv;
+    miu_vec2 size;
+    miu_vec2 pivot;
     miu_color color;
     int32_t layer;
 } miu_cpu_sprite;

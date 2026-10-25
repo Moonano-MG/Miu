@@ -4,6 +4,8 @@
 #include "miu/miu.h"
 
 #include <cstdint>
+#include <limits>
+#include <new>
 #include <utility>
 #include <vector>
 
@@ -69,6 +71,7 @@ struct RendererRequest final {
 /** Immutable backend selection returned by a live renderer policy handle. */
 struct RenderPlan final {
     Backend backend{};
+    Backend profile_backend{};
     RenderTier tier{};
     bool emergency_fallback = false;
     bool below_minimum = false;
@@ -127,6 +130,7 @@ public:
         const auto raw_status = miu_renderer_get_plan(handle_, &raw_plan);
         if (raw_status == MIU_STATUS_OK) {
             out_plan->backend = raw_plan.backend;
+            out_plan->profile_backend = raw_plan.profile_backend;
             out_plan->tier = raw_plan.tier;
             out_plan->emergency_fallback = raw_plan.emergency_fallback != 0;
             out_plan->below_minimum = raw_plan.below_minimum != 0;
@@ -232,7 +236,10 @@ public:
         if (out_status != nullptr) {
             *out_status = static_cast<Status>(raw_status);
         }
-        return CpuCanvas(raw_status == MIU_STATUS_OK ? handle : nullptr, width, height);
+        return CpuCanvas(
+            raw_status == MIU_STATUS_OK ? handle : nullptr,
+            raw_status == MIU_STATUS_OK ? width : 0U,
+            raw_status == MIU_STATUS_OK ? height : 0U);
     }
 
     [[nodiscard]] bool valid() const noexcept { return handle_ != nullptr; }
@@ -257,15 +264,39 @@ public:
             miu_cpu_canvas_draw_sprite(handle_, &camera, &sprite, texture.handle_));
     }
 
-    /** Copies canvas pixels into a caller-owned tightly packed RGBA8 vector. */
-    [[nodiscard]] Status copy_rgba8(std::vector<std::uint8_t>* out_pixels) const {
+    /**
+     * Copies canvas pixels into a caller-owned tightly packed RGBA8 vector.
+     *
+     * Allocation failure is converted to `Status::OutOfMemory`; `out_pixels` is
+     * cleared on any failure and never exposes an uninitialised snapshot.
+     */
+    [[nodiscard]] Status copy_rgba8(std::vector<std::uint8_t>* out_pixels) const noexcept {
         if (handle_ == nullptr || out_pixels == nullptr) {
             return Status::InvalidArgument;
         }
-        const auto byte_count = static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_) * 4U;
-        out_pixels->resize(byte_count);
-        return static_cast<Status>(miu_cpu_canvas_copy_rgba8(
+        constexpr auto max_size = (std::numeric_limits<std::size_t>::max)();
+        if (height_ != 0U && static_cast<std::size_t>(width_) > max_size / static_cast<std::size_t>(height_)) {
+            out_pixels->clear();
+            return Status::OutOfMemory;
+        }
+        const auto pixels = static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_);
+        if (pixels > max_size / 4U) {
+            out_pixels->clear();
+            return Status::OutOfMemory;
+        }
+        const auto byte_count = pixels * 4U;
+        try {
+            out_pixels->resize(byte_count);
+        } catch (const std::bad_alloc&) {
+            out_pixels->clear();
+            return Status::OutOfMemory;
+        }
+        const auto status = static_cast<Status>(miu_cpu_canvas_copy_rgba8(
             handle_, out_pixels->data(), out_pixels->size()));
+        if (status != Status::Ok) {
+            out_pixels->clear();
+        }
+        return status;
     }
 
     void reset() noexcept {

@@ -84,6 +84,15 @@ namespace Miu
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    public struct CpuSourceRect
+    {
+        public uint X;
+        public uint Y;
+        public uint Width;
+        public uint Height;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     public struct CpuCamera2D
     {
         public CpuVector2 Position;
@@ -96,7 +105,10 @@ namespace Miu
     public struct CpuSprite
     {
         public CpuTransform2D Transform;
+        public CpuSourceRect Source;
         public CpuUvRect Uv;
+        public CpuVector2 Size;
+        public CpuVector2 Pivot;
         public CpuColor Color;
         public int Layer;
     }
@@ -212,8 +224,21 @@ namespace Miu
             {
                 return Status.OutOfMemory;
             }
-            pixels = new byte[(int)byteCount];
-            return CpuNative.CanvasCopy(handle, pixels, new UIntPtr((uint)byteCount));
+            byte[] snapshot;
+            try
+            {
+                snapshot = new byte[(int)byteCount];
+            }
+            catch (OutOfMemoryException)
+            {
+                return Status.OutOfMemory;
+            }
+            var status = CpuNative.CanvasCopy(handle, snapshot, new UIntPtr(byteCount));
+            if (status == Status.Ok)
+            {
+                pixels = snapshot;
+            }
+            return status;
         }
 
         public void Dispose()
