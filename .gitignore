@@ -1,12 +1,30 @@
+# Build outputs
 /target/
-/zig-out/
 /build/
 /out/
+/zig-out/
+
+# Native artefacts produced next to the samples
 *.dll
 *.dylib
 *.so
 *.a
 *.lib
 *.pdb
-*.user
+*.exp
+*.ilk
+
+# Renderer output from the samples and the CLI
+miu-software-scene.png
+miu-document.png
+*.miu.render.png
+
+# Editor and tooling state
 .vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Cargo's local overrides
+/crates/*/Cargo.lock

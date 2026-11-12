@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "viewport": [960, 540],
+  "background": "#0b0d14",
+  "camera": { "position": [480, 270], "zoom": 1.0, "rotation": 0 },
+  "assets": {
+    "textures": {
+      "backdrop": "art/backdrop.png",
+      "character": "art/character.png"
+    }
+  },
+  "nodes": [
+    {
+      "type": "sprite",
+      "name": "backdrop",
+      "texture": "backdrop",
+      "size": [960, 540],
+      "pivot": [0.5, 0.5],
+      "position": [480, 270],
+      "layer": 0
+    },
+    {
+      "type": "sprite",
+      "name": "heroine",
+      "texture": "character",
+      "size": [420, 520],
+      "pivot": [0.5, 1.0],
+      "position": [560, 540],
+      "layer": 10
+    },
+    {
+      "type": "shape",
+      "name": "dialogue-box",
+      "rect": [0, 0, 880, 150],
+      "fill": "#101623d9",
+      "position": [40, 370],
+      "layer": 20
+    },
+    {
+      "type": "shape",
+      "name": "accent-bar",
+      "rect": [0, 0, 6, 150],
+      "fill": "#5ec8ff",
+      "position": [40, 370],
+      "layer": 21
+    }
+  ],
+  "animations": [
+    {
+      "name": "breathing",
+      "duration": 3.0,
+      "loop": true,
+      "tracks": [
+        {
+          "node": "heroine",
+          "property": "y",
+          "keys": [[0, 540, "ease_in_out"], [1.5, 534, "ease_in_out"], [3.0, 540]]
+        },
+        {
+          "node": "accent-bar",
+          "property": "opacity",
+          "keys": [[0, 0.55], [1.5, 1.0, "ease_in_out"], [3.0, 0.55]]
+        }
+      ]
+    }
+  ]
+}

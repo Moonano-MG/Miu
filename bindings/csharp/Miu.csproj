@@ -1,9 +1,31 @@
 <Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Miu C# binding.
+
+    The native library is not built by this project: run `cargo build -p miu-ffi`
+    (release builds produce `target/release/miu.dll`, `libmiu.so`, or
+    `libmiu.dylib`) and copy or link it next to the managed assembly.
+
+    The project targets `net8.0` for desktop tooling and `netstandard2.1` for engine
+    plugins; both targets use the same P/Invoke surface, so a plugin can reference the
+    binding without pulling in a newer runtime.
+  -->
+
   <PropertyGroup>
-    <TargetFramework>netstandard2.0</TargetFramework>
-    <LangVersion>7.3</LangVersion>
-    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <TargetFrameworks>net8.0;netstandard2.1</TargetFrameworks>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <AssemblyName>Miu</AssemblyName>
     <RootNamespace>Miu</RootNamespace>
+    <Description>C# binding for the Miu 2D rendering engine (C ABI version 3).</Description>
   </PropertyGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.1'">
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+  </ItemGroup>
+
 </Project>

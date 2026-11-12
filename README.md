@@ -1,97 +1,129 @@
 # Miu
 
-**Miu** is a capability-driven, cross-platform 2D renderer. Its rendering policy is written in Rust; a deliberately small C ABI makes it usable from modern C++, C#, and other native hosts. C++ owns the optional platform bridge layer so existing graphics SDKs can be integrated without exposing them through Rust's public API.
+**Miu** is a tiered, capability-driven 2D rendering engine. Engine logic lives in
+dependency-free Rust; a small, versioned C ABI exposes it to C++, C#, and web hosts;
+C++ owns the platform layer that creates windows, probes drivers, and talks to
+graphics APIs.
 
-> Status: **v0.1.0-dev, not yet a presentation renderer**. Miu currently provides selection policy, 2D camera/batching, and a deterministic CPU reference rasterizer. It does **not** yet create a window, GPU device, swapchain, or present pixels. It is therefore not yet sufficient on its own for a shipped game or visual-novel editor.
+```rust
+use miu_scene::{Document, Player};
 
-## Design goals
+let text = std::fs::read_to_string("samples/scenes/visual_novel.miu.json")?;
+let document = Document::parse(&text)?;
+let player = Player::from_document(&document, &read_assets(&document)?)?;
+std::fs::write("frame.png", player.render_at_size(1280, 720)?)?;
+```
 
-- **Pragmatic 2D:** transforms, independent `Camera2D`, sprites, draw ordering, and batching are first-class.
-- **Tiered deployment:** compatibility, balanced, and premium tiers honour the host's preferred compliant tier first, escalating only when that tier cannot run.
-- **Predictable failures:** unsupported hardware is reported before a renderer is created; an application may explicitly choose a best-effort run.
-- **Portable boundary:** Rust owns policy and frame preparation. C++ owns platform probes and compatibility-library bridges. C++ and C# call the same versioned C ABI.
-- **No hidden platform fallback:** a fallback is part of the returned render plan and can be displayed in application UI or telemetry.
+```cpp
+miu::Renderer renderer(1280, 720, miu::Preset::High);
+miu::Camera camera = miu::Camera::ForViewport(1280.0f, 720.0f);
+renderer.begin_frame(miu::Rgba8{12, 14, 18, 255});
+renderer.fill_rect(camera, miu::Rect(40, 40, 200, 80), miu::colors::Rgb8(90, 180, 255));
+```
+
+## What is in the box
+
+* **Independent `Camera2D`** — position, viewport, zoom, rotation, plus
+  `CameraController` for pan, zoom-at-cursor, fit-to-rect, and bounds clamping.
+  Screen↔world conversion is exact and invertible.
+* **Scene graph** — groups, sprites, text, and vector shapes with transforms, layers,
+  accumulated opacity, tags, hit testing, and stable draw ordering.
+* **Text** — a TrueType parser (composite glyphs included), shaping with kerning and
+  letter spacing, word/character wrapping, and a byte-budgeted glyph mask cache.
+* **Vectors** — paths with cubic/quadratic curves, dashes, joins and caps, an analytic
+  anti-aliasing rasteriser, solid/linear/radial gradients, and five blend modes.
+* **Images** — PNG (decode and encode), BMP, TGA, and QOI codecs, all hand-written.
+  Textures are premultiplied, with straight-alpha entry points.
+* **Animation** — keyframe tracks with easing, looping, fades, and absolute-time
+  seeking.
+* **Documents** — a JSON scene format shared by the runtime, the CLI, and the editor;
+  see [`docs/scene-format.md`](docs/scene-format.md).
+* **Deterministic CPU renderer** — same scene in, same bytes out, which makes
+  golden-image tests possible without a GPU.
+* **Tiered policy** — three tiers, four quality presets, per-platform API catalogues,
+  and explicit emergency fallbacks that can never be selected silently.
+* **Four surfaces** — Rust crates, a C ABI (v3), a C++17 RAII wrapper, and a C# binding.
 
 ## Renderer tiers
 
 | Tier | Goal | Windows | Android | Apple | Linux | Web |
-|---|---|---|---|---|---|---|
-| `Compatibility` | lowest overhead / legacy devices | Direct2D 1.2 | OpenGL ES 3.0 | Metal 2 | Vulkan 1.1 | WebGL 2 |
-| `Balanced` | quality/performance balance | D3D 11.3 | Vulkan 1.2–1.3 | Metal 3 | Vulkan 1.2 | WebGL 2 |
-| `Premium` | strongest image features | D3D 12 | Vulkan 1.4 | Metal 3 | Vulkan 1.3 | WebGPU |
+| --- | --- | --- | --- | --- | --- | --- |
+| Compatibility | lowest overhead, legacy devices | Direct2D 1.2 | OpenGL ES 3.0 | Metal 2 | Vulkan 1.1 | WebGL 2 |
+| Balanced | quality/performance balance | Direct3D 11.3 | Vulkan 1.2–1.3 | Metal 3 | Vulkan 1.2 | WebGL 2 |
+| Premium | strongest image features | Direct3D 12 | Vulkan 1.4 | Metal 3 | Vulkan 1.3 | WebGPU |
 
-If the requested primary API cannot initialise, Miu's **emergency** candidates are OpenGL 3.3 (Windows), OpenGL ES 2 (Android), Metal 1 (Apple), OpenGL 3.0 (Linux), and WebGL 1 (web). Emergency candidates are never silently selected: `RenderPlan.emergency_fallback` is set.
+Emergency candidates — OpenGL 3.3 (Windows), OpenGL ES 2 (Android), Metal 1 (Apple),
+OpenGL 3.0 (Linux), WebGL 1 (web) — are reachable only through `select_best_effort`,
+always arrive flagged, and come with a warning string the host must show. Quality
+presets are `Low` (90/10 performance to quality), `Medium` (70/30), `High` (40/60), and
+`Unlimited` (10/90).
 
 ## Repository layout
 
 ```text
-crates/miu-core    Rust policy, Camera2D, batching, and CPU reference renderer
-crates/miu-ffi     versioned C ABI, policy handle, CPU texture/canvas handles
-include/miu        public C header and C++17 RAII wrapper
-native             C++ platform-probe bridge contract and default probe
-bindings/csharp    P/Invoke surface with explicit native handle lifetime
-samples/cpp        minimal C++ consumer
+crates/miu-core       math, colour, Camera2D, backend policy, quality presets
+crates/miu-graphics   textures, paths, rasteriser, fonts, text, codecs, CPU renderer
+crates/miu-scene      scene graph, animation, JSON documents, Player driver
+crates/miu-ffi        C ABI v3 (cdylib + staticlib + rlib)
+crates/miu-cli        `miu plan`, `miu info`, `miu render`
+include/miu           miu.h (C11) and miu.hpp (C++17 RAII)
+native                platform bridge: capability probe, device factories, CPU device
+bindings/csharp       P/Invoke surface with owning handle wrappers
+samples               C++ programs and a sample visual-novel scene
+scripts               manual verification and ABI layout check
+docs                  architecture, ABI, scene format, roadmap
 ```
 
-## Using the policy core (Rust)
+## Building
 
-```rust
-use miu_core::{DeviceCapabilities, Platform, RendererRequest, RenderTier, select_renderer};
-
-let device = DeviceCapabilities::for_platform(Platform::Windows)
-    .with_backend(miu_core::Backend::Direct3D12);
-let request = RendererRequest::new(RenderTier::Balanced);
-let plan = select_renderer(&device, &request).expect("supported device");
-assert_eq!(plan.backend, miu_core::Backend::Direct3D12);
-```
-
-## Manual build policy
-
-This repository intentionally contains **no GitHub Actions build workflow**. Builds,
-tests, samples, and platform validation are run explicitly by maintainers. The Rust
-workspace needs Rust 1.75 or newer:
+Rust 1.75 or newer; no third-party crates, so `cargo` needs no network access.
 
 ```sh
-./scripts/verify-manually.sh
-# or run individual commands:
-cargo test --workspace
+cargo test --workspace          # unit tests for every crate
+cargo build --release           # miu-core, miu-graphics, miu-scene, miu-cli
+cargo build -p miu-ffi --release # produces libmiu.so / miu.dll / libmiu.dylib
+```
+
+C++ pieces use CMake 3.21+:
+
+```sh
 cargo build -p miu-ffi --release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ```
 
-Compile `native/src/miu_bridge.cpp` with C++17 for the default platform probe, or implement the API from `native/include/miu/miu_bridge.h` in an application-specific bridge. Add `include` to your C++ include paths and link the produced `miu_ffi` static/shared library. The C++ sample can be syntax-checked with:
+The ABI layout check and the sample builds do not need Cargo, so a C++-only checkout
+can still validate the boundary:
 
 ```sh
-c++ -std=c++17 -Iinclude -Inative/include -c samples/cpp/minimal.cpp
-c++ -std=c++17 -Iinclude -Inative/include -c samples/cpp/software_canvas.cpp
+cc  -std=c11 -Iinclude scripts/abi_layout_check.c -o /dev/null
+g++ -std=c++17 -Iinclude -Inative/include -c samples/cpp/minimal.cpp -o /dev/null
 ```
 
-The software renderer is fully deterministic and requires neither a window nor a
-GPU driver. It is suitable for headless tests, tools, and visual-novel preview
-surfaces. Generate a small composited scene with:
+## Command line
 
 ```sh
-cargo run -p miu-core --example software_scene
-# writes miu-software-scene.ppm
+miu plan --platform linux --backends vulkan-1.2,vulkan-1.3 --min compatibility --prefer balanced
+miu info samples/scenes/visual_novel.miu.json
+miu render samples/scenes/visual_novel.miu.json --out frame.png --time 1.5 --width 1280 --height 720
 ```
 
-`bindings/csharp/` intentionally has no NuGet dependency. It resolves the native library as `miu_ffi`; package that platform library beside the managed assembly or through the platform loader path.
+`miu plan` prints the selected API, tier, preset, quality settings, and the warning a
+player would see. `miu render` decodes the document's assets next to it and writes a
+PNG, which is how CI produces reference frames.
 
-## Web policy
+## Status
 
-Web builds should probe WebGPU first for the premium tier and WebGL for lower tiers. In embedded browser environments, a host may populate native platform capabilities (for example a Windows adapter) and pass those to the same selector; the web candidates remain the portable fallback. Actual browser probing belongs in the web host/bridge because browser APIs are asynchronous.
+The engine core — cameras, scene graph, text, vectors, codecs, animation, documents,
+the CPU renderer, the policy layer, and the ABI — is implemented and unit-tested. The
+platform layer ships the capability probe, the factory contract, and a working CPU
+device; the per-API GPU factories (Direct3D, Vulkan, Metal, and the browser bridges)
+are the remaining work and are tracked in [`docs/roadmap.md`](docs/roadmap.md). Until
+they land, a host that opens a bridge session gets the CPU device, and the reason the
+planned backend was unavailable is reported rather than hidden.
 
-## Project requirement policy
+## Licence
 
-Choose the lowest tier your project supports (`Compatibility`, `Balanced`, or `Premium`) and a preferred compliant tier. Miu tries the preferred tier first (using the strongest API profile within that tier), then escalates only to stronger tiers when the preference cannot run. The plan records both the profile requirement and actual device API. Invalid public requests, including a preference below the minimum, are rejected even in best-effort mode. If no compliant plan exists, Rust reports all attempted candidates. Calling the explicit force/best-effort entry point permits an emergency candidate and marks the plan unsafe so the host can warn users that a crash or degraded rendering is possible.
+GPL-3.0-or-later. See [`LICENSE`](LICENSE).
 
-CPU textures, canvas clears, and output pixels use premultiplied RGBA8. Supply already-premultiplied data to `Texture::new` / `miu_cpu_texture_create_rgba8`, or choose the explicit straight-alpha conversion API (`Texture::from_straight_alpha` / `miu_cpu_texture_create_straight_rgba8`). Source UV sampling is clamped to the selected atlas source rectangle, so it cannot bleed into adjacent atlas entries.
-
-See [ABI v2 migration](docs/abi-v2-migration.md) before updating native bindings.
-
-## License
-
-Miu is licensed under [GPL-3.0-or-later](LICENSE). If you distribute a game,
-editor, or other program that links Miu (including `miu_ffi`), GPL obligations
-can apply to that combined distribution. This repository does not provide a
-commercial-license exception. Confirm your distribution model with qualified
-legal advice before integrating Miu into proprietary software.
+中文简介见 [`README.zh-CN.md`](README.zh-CN.md)。

@@ -1,0 +1,20 @@
+# Every sample links the C ABI library (`miu`) plus the bridge when it needs it.
+find_library(MIU_ABI_LIBRARY NAMES miu)
+
+function(miu_add_sample name source)
+    add_executable(${name} ${source})
+    target_compile_features(${name} PRIVATE cxx_std_17)
+    target_include_directories(${name} PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    if(TARGET miu_bridge)
+        target_link_libraries(${name} PRIVATE miu_bridge)
+        target_include_directories(${name} PRIVATE ${PROJECT_SOURCE_DIR}/native/include)
+    endif()
+    if(MIU_ABI_LIBRARY)
+        target_link_libraries(${name} PRIVATE ${MIU_ABI_LIBRARY})
+    endif()
+endfunction()
+
+miu_add_sample(minimal minimal.cpp)
+miu_add_sample(camera_zoom camera_zoom.cpp)
+miu_add_sample(document_player document_player.cpp)
+miu_add_sample(bridge_session bridge_session.cpp)

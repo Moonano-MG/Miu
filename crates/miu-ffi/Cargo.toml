@@ -4,13 +4,15 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Stable C ABI for Miu, used by C++ and C# bindings."
+description = "Versioned C ABI for Miu, consumed by the C++, C#, and web bindings."
 
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-miu-core = { path = "../miu-core" }
+miu-core.workspace = true
+miu-graphics.workspace = true
+miu-scene.workspace = true
 
 [lints]
 workspace = true

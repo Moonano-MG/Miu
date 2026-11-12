@@ -1,0 +1,14 @@
+[package]
+name = "miu-scene"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Scene graph, animation, and document loading for Miu."
+
+[dependencies]
+miu-core.workspace = true
+miu-graphics.workspace = true
+
+[lints]
+workspace = true

@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Platform-neutral selection, camera, and batching core for Miu."
+description = "Foundation types for Miu: math, colour, cameras, tier policy, and quality presets."
+
+[dependencies]
 
 [lints]
 workspace = true

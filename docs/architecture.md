@@ -1,85 +1,119 @@
-# Miu v0.1 architecture
+# Miu architecture
 
-## Ownership boundaries
+Miu is a tiered, capability-driven 2D engine. The Rust crates hold the engine logic;
+the C++ layer holds everything that has to talk to a window or a graphics API. Both
+sides meet at a single versioned C ABI, so a game can be written in Rust, C++, or C#
+without the engine growing three implementations.
 
-```text
-C# / C++ application
-       │ public C# P/Invoke or C++17 RAII wrapper
-       ▼
-include/miu/miu.h  ────────── stable C ABI ─────────► crates/miu-ffi
-                                                              │
-                                                              ▼
-                                                crates/miu-core (Rust)
-                                      selection policy · Camera2D · CPU batches
-                                                              │ selected plan
-                                                              ▼
-native/ C++ bridge ◄── host-specific probes / API adapters ──► GPU API
+```
+        hosts                       engine                         platform
+  ┌──────────────┐        ┌──────────────────────┐        ┌────────────────────┐
+  │ Rust game    │───┐    │ miu-scene            │        │ miu::bridge        │
+  │ C++ / C# app │───┼───▶│   scene, animation,  │        │   probe_backends   │
+  │ Web (wasm)   │───┘    │   document, player   │        │   device factories │
+  └──────────────┘        ├──────────────────────┤        └─────────┬──────────┘
+         │                │ miu-graphics         │                  │
+         │   C ABI v3     │   texture, path,     │        ┌─────────▼──────────┐
+         └───────────────▶│   raster, text,      │        │ D3D12 / Vulkan /   │
+                          │   codecs, renderer   │        │ Metal / D2D / GLES │
+                          ├──────────────────────┤        └────────────────────┘
+                          │ miu-core             │
+                          │   math, colour,      │
+                          │   camera, policy,    │
+                          │   quality            │
+                          └──────────────────────┘
 ```
 
-Rust does not own window handles or expose platform SDK handles across the ABI.
-It can therefore be tested identically on every target. The C++ bridge owns
-platform headers, C++ library compatibility adapters, and the actual
-hardware-graphics-device lifetime. The ABI preserves a selected `RenderPlan` and
-also exposes a deterministic CPU texture/canvas renderer. Future hardware command
-encoders will be added behind this same boundary rather than leaking backend
-objects.
+## Crates
 
-## Selection sequence
+| Crate | Contents | Depends on |
+| --- | --- | --- |
+| `miu-core` | vectors, rectangles, affine transforms, premultiplied colour, `Camera2D` and its controller, the backend catalogue and render-plan policy, quality presets and the frame-time governor | nothing |
+| `miu-graphics` | textures and texture stores, sprite batches, paths and stroking, an analytic anti-aliasing rasteriser, gradients, TrueType parsing, text layout, glyph caching, PNG/BMP/TGA/QOI codecs, the CPU renderer | `miu-core` |
+| `miu-scene` | scene graph, animation tracks, the JSON document format, and the `Player` frame driver | `miu-core`, `miu-graphics` |
+| `miu-ffi` | the C ABI v3 surface: `cdylib`, `staticlib`, and `rlib` | all of the above |
+| `miu-cli` | `miu plan`, `miu info`, `miu render` | `miu-core`, `miu-scene` |
 
-1. The host creates its window/surface and probes APIs it can genuinely initialise.
-2. It reports only successful probes as `DeviceCapabilities` / `CapabilityReport`.
-3. The application supplies a minimum tier and an optional preferred tier.
-4. `select_renderer` first tries the requested preferred tier (when it is at or
-   above the minimum), choosing its strongest profile, and only then escalates to
-   stronger tiers. Invalid requests are rejected by strict and best-effort paths.
-   An unavailable result includes an ordered attempted list in Rust for diagnostics.
-5. Only after user confirmation, `select_best_effort` may choose a lower profile or
-   an emergency fallback. The returned plan is marked so the warning cannot be
-   lost.
-6. The C++ bridge creates the device for the selected backend. If that fails, remove
-   the failed API from the capability report and select again. Do not silently
-   change APIs beneath the application.
+No crate depends on a third-party library. Windowing, GPU device creation, and
+platform probing live in C++ (`native/`), which is also where a host adds the APIs it
+can ship.
 
-This separates a cheap, deterministic policy decision from API/device failures
-that are necessarily platform-specific.
+## Frame model
 
-## Frame preparation
+1. **Input** — the host updates the camera, the scene, or both. The camera is pure
+   state: `position`, `viewport`, `zoom`, `rotation_radians`. `CameraController` adds
+   pan/zoom interaction (`zoom_at`, `pan_screen_delta`, `fit_rect`, bounds clamping).
+2. **Build** — `Scene::build` walks the graph in painter order and emits a
+   `DisplayList` of `DrawOp`s. Opacity accumulates down the tree, layers sort first,
+   and invisible subtrees are skipped. Text layout happens here, so a frame costs one
+   layout per text node rather than one per glyph.
+3. **Render** — a backend consumes the display list. The CPU renderer rasterises
+   directly; a GPU bridge uploads the same ops as per-instance state. Both see the
+   same culling rules, so `RenderStats` is comparable across backends.
+4. **Present** — the host swaps or writes the framebuffer. The CPU renderer can encode
+   PNG for tests, thumbnails, and tools.
 
-`Camera2D` maps world points to a logical top-left-origin viewport and has exact
-inverse mapping for picking. It validates viewport, zoom, and rotation before a
-transform is made.
+## Coordinate spaces
 
-`BatchBuilder` owns a single frame's sprites. Use `BatchMode::Stable` for alpha
-content: it orders by layer and preserves submission order within a layer. Use
-`BatchMode::Opaque` only where overlap ordering is irrelevant; it sorts texture
-state within each layer and emits fewer `DrawBatch` ranges. A backend encoder
-binds the batch texture once and writes the contiguous instances in each range.
+* **Local** — a node's own space; sprite rectangles and path outlines live here.
+* **World** — after the node chain's transforms. Positions in documents are world
+  coordinates.
+* **Screen** — after the camera: `translate(-position) → scale(zoom) → rotate(-θ) →
+  translate(viewport / 2)`. `Camera2D::screen_to_world` inverts it for picking.
 
-`Canvas`, `Texture`, and `TextureStore` implement that same command stream with a
-deterministic CPU backend. It supports nearest-neighbour UV sampling constrained to
-the selected source rectangle, sprite translation/rotation/scale including
-mirroring, premultiplied source-over blending, and a validated camera inverse.
-Texture input and clear colours are rejected unless premultiplied; explicit
-straight-alpha conversion helpers are provided. The C ABI, C++ wrapper, and C#
-binding expose CPU texture/canvas lifetime and drawing calls for headless test
-tools and previews.
+Angles are radians in every API, and degrees in document JSON, because artists author
+rotation in degrees and code wants radians. The loader converts once.
 
-## Compatibility contract
+## Colour and blending
 
-The C ABI uses only fixed-width scalar fields and opaque pointers. ABI v1
-structures and unsuffixed functions remain binary-safe: `miu_render_plan` stays
-four bytes and `miu_cpu_canvas_draw_sprite` consumes the original 56-byte sprite
-descriptor. ABI v2 additions use `miu_render_plan_v2`,
-`miu_renderer_get_plan_v2`, `miu_cpu_sprite_v2`, and
-`miu_cpu_canvas_draw_sprite_v2`; they are never interpreted through v1 pointers.
+All stored colour is premultiplied. `Color::straight`/`Color::from_rgba8` premultiply
+on the way in; `to_straight` converts back for authoring tools and encoders. Blend
+modes are `SourceOver`, `Add`, `Multiply`, `Screen`, and `Copy`. Interpolation happens
+in premultiplied space, which is what keeps alpha edges from glowing.
 
-Call `miu_abi_version()` and `miu_abi_min_supported_version()` before using v2.
-The C++ and C# wrappers do this at runtime and also guard their v2 descriptor
-sizes. The selector accepts the unchanged v1 policy input layout for legacy
-callers, while new bindings send ABI v2 and use only suffixed v2 output calls.
-The complete source/binary migration rules are in
-[ABI v2 migration](abi-v2-migration.md).
+## Tiering and backend selection
 
-Manual validation is deliberately tracked in `scripts/verify-manually.sh` rather
-than GitHub Actions; it compiles ABI layout guards, C/C++ public surfaces, Rust,
-and (when installed) the C# binding.
+`miu-core::policy` maps a `Platform` to a catalogue of `(backend, tier, emergency)`
+profiles:
+
+| Tier | Windows | Android | Apple | Linux | Web |
+| --- | --- | --- | --- | --- | --- |
+| Compatibility | Direct2D 1.2 | OpenGL ES 3.0 | Metal 2 | Vulkan 1.1 | WebGL 2 |
+| Balanced | Direct3D 11.3 | Vulkan 1.2 / 1.3 | Metal 3 | Vulkan 1.2 | WebGL 2 |
+| Premium | Direct3D 12 | Vulkan 1.4 | Metal 3 | Vulkan 1.3 | WebGPU |
+| Emergency | OpenGL 3.3 | OpenGL ES 2.0 | Metal 1 | OpenGL 3.0 | WebGL 1 |
+
+A project declares `minimum_tier`, `preferred_tier`, and a preset. Selection tries the
+preferred tier first, then escalates; it never descends below the minimum and never
+picks an emergency API. `select_best_effort` is the separate, explicit path that may
+break those rules, and any plan it returns carries flags that `plan_warning` turns
+into the message a player must confirm.
+
+A browser build reports `Platform::Web`, but embedded web runtimes often expose the
+real device: `select_web_renderer` takes an optional native device and prefers it,
+falling back to WebGPU/WebGL only when the native probe fails.
+
+## Quality presets
+
+| Preset | performance / quality | MSAA | sprites / frame | glyph cache | texture cache |
+| --- | --- | --- | --- | --- | --- |
+| Low | 90 / 10 | 1 | 4 096 | 2 MiB | 64 MiB |
+| Medium | 70 / 30 | 2 | 16 384 | 8 MiB | 128 MiB |
+| High | 40 / 60 | 4 | 65 536 | 16 MiB | 256 MiB |
+| Unlimited | 10 / 90 | 8 | 1 048 576 | 64 MiB | 1 024 MiB |
+
+`Preset::budget()` exposes the split to settings screens. `QualityGovernor` smooths
+frame times (EMA, α = 0.1) and steps presets after 30 slow or 120 fast frames with a
+90-frame cooldown, so a loading hitch does not permanently downgrade quality.
+
+## Documents
+
+`miu-scene::document` reads a JSON scene description: viewport, camera, assets, a node
+tree, and animations. Parsing resolves asset names to ids and validates structure;
+decoding is the host's decision, which is what lets an editor keep textures in GPU
+memory instead of re-reading files. See [`scene-format.md`](scene-format.md).
+
+## Determinism
+
+The CPU renderer is deterministic: same scene, same camera, same bytes out. That makes
+golden-image tests viable and lets CI diff frames (`miu render`) without a GPU.

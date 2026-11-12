@@ -2,7 +2,10 @@
 resolver = "2"
 members = [
     "crates/miu-core",
+    "crates/miu-graphics",
+    "crates/miu-scene",
     "crates/miu-ffi",
+    "crates/miu-cli",
 ]
 
 [workspace.package]
@@ -11,13 +14,27 @@ edition = "2021"
 rust-version = "1.75"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/Moonano-MG/Miu"
-description = "A capability-driven cross-platform 2D rendering engine."
+description = "Miu is a tiered, capability-driven cross-platform 2D rendering engine."
+
+[workspace.dependencies]
+miu-core = { path = "crates/miu-core" }
+miu-graphics = { path = "crates/miu-graphics" }
+miu-scene = { path = "crates/miu-scene" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
 missing_docs = "warn"
 
+[workspace.lints.clippy]
+correctness = "deny"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# Profiling profile: keeps frame-time attribution usable while retaining release speed.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
